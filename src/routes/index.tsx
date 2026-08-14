@@ -17,7 +17,8 @@ export const Route = createFileRoute("/")({
       { property: "og:title", content: "ServiceHub" },
       {
         property: "og:description",
-        content: "When others rest, We rise! — Service Hub, the home of unstoppable service.",
+        content:
+          "When others rest, We rise! — Service Hub, the home of unstoppable service.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
@@ -69,44 +70,63 @@ function LoginPage() {
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-background px-4">
-      <div className="w-full max-w-sm border border-border bg-card p-8 shadow-sm">
-        <h1 className="sr-only">Service Hub</h1>
-        <img
-          src="/logo.png"
-          alt="Service Hub logo"
-          className="mx-auto h-12 w-auto"
-        />
-        <p className="mt-2 text-center text-xs text-muted-foreground">Created by: Christer John Parco</p>
-        <p className="mt-4 border-t border-border pt-4 text-center text-sm text-muted-foreground">
-          When others rest, We rise! — Service Hub, the home of unstoppable service.
+      <div className="w-full max-w-sm border-2 border-foreground bg-card shadow-lg">
+        <div className="h-2 w-full bg-hivis" />
+        <div className="p-8">
+          <h1 className="sr-only">Service Hub</h1>
+          <img
+            src="/logo.png"
+            alt="Service Hub logo"
+            className="mx-auto h-12 w-auto"
+          />
+          <p className="eyebrow mt-5 text-center text-primary">
+            Field dispatch · Engineer sign in
+          </p>
+          <p className="mt-4 border-t border-border pt-4 text-center text-sm leading-relaxed text-muted-foreground">
+            When others rest, We rise! — Service Hub, the home of unstoppable
+            service.
+          </p>
+          <form onSubmit={handleSubmit} className="mt-8 space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="username">Username</Label>
+              <Input
+                className="h-11"
+                id="username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                autoComplete="username"
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="password">Password</Label>
+              <Input
+                className="h-11"
+                id="password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+                required
+              />
+            </div>
+            {error && (
+              <p className="border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm font-medium text-destructive">
+                {error} — check your username and password, then try again.
+              </p>
+            )}
+            <Button
+              type="submit"
+              className="h-12 w-full text-base font-semibold"
+              disabled={loading}
+            >
+              {loading ? "Checking…" : "Log in"}
+            </Button>
+          </form>
+        </div>
+        <p className="border-t border-border px-8 py-3 text-center text-[11px] text-muted-foreground">
+          Created by Christer John Parco
         </p>
-        <form onSubmit={handleSubmit} className="mt-8 space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="username">Username</Label>
-            <Input
-              id="username"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              autoComplete="username"
-              required
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="password">Password</Label>
-            <Input
-              id="password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="current-password"
-              required
-            />
-          </div>
-          {error && <p className="text-sm font-medium text-destructive">{error}</p>}
-          <Button type="submit" className="w-full" disabled={loading}>
-            {loading ? "Checking…" : "Log in"}
-          </Button>
-        </form>
       </div>
     </main>
   );

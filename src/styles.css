@@ -1,7 +1,7 @@
 @import "tailwindcss" source(none);
 @source "../src";
 @import "tw-animate-css";
-@import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;700&family=Barlow+Condensed:wght@400;600&display=swap');
+@import url("https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Condensed:wght@500;600;700&display=swap");
 
 @custom-variant dark (&:is(.dark *));
 
@@ -64,17 +64,21 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+  --color-hivis: var(--hivis);
+  --color-hivis-foreground: var(--hivis-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
 }
 
 :root {
   --radius: 0px;
-  --background: oklch(0.97 0.002 247.9);
-  --foreground: oklch(0.2 0.01 264.7);
+  --background: oklch(0.96 0.004 247.9);
+  --foreground: oklch(0.16 0.02 264.7);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.2 0.01 264.7);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.2 0.01 264.7);
-  --primary: oklch(0.53 0.07 246);
+  --primary: oklch(0.46 0.13 250);
   --primary-foreground: oklch(0.98 0.003 247.9);
   --secondary: oklch(0.94 0.005 247.9);
   --secondary-foreground: oklch(0.2 0.01 264.7);
@@ -84,9 +88,9 @@
   --accent-foreground: oklch(0.3 0.05 246);
   --destructive: oklch(0.55 0.19 27.3);
   --destructive-foreground: oklch(0.98 0.003 247.9);
-  --border: oklch(0.85 0.01 258);
-  --input: oklch(0.85 0.01 258);
-  --ring: oklch(0.53 0.07 246);
+  --border: oklch(0.78 0.015 258);
+  --input: oklch(0.78 0.015 258);
+  --ring: oklch(0.46 0.13 250);
   --chart-1: oklch(0.53 0.07 246);
   --chart-2: oklch(0.6 0.09 246);
   --chart-3: oklch(0.68 0.06 246);
@@ -99,13 +103,17 @@
   --sidebar-accent: oklch(0.94 0.005 247.9);
   --sidebar-accent-foreground: oklch(0.2 0.01 264.7);
   --sidebar-border: oklch(0.85 0.01 258);
-  --sidebar-ring: oklch(0.53 0.07 246);
+  --sidebar-ring: oklch(0.46 0.13 250);
+  --hivis: oklch(0.85 0.17 92);
+  --hivis-foreground: oklch(0.2 0.04 92);
+  --success: oklch(0.6 0.15 150);
+  --success-foreground: oklch(0.98 0.01 150);
 }
 
 .dark {
-  --background: oklch(0.2 0.03 246);
+  --background: oklch(0.17 0.02 250);
   --foreground: oklch(0.96 0.01 247.9);
-  --card: oklch(0.25 0.035 246);
+  --card: oklch(0.22 0.025 250);
   --card-foreground: oklch(0.96 0.01 247.9);
   --popover: oklch(0.25 0.035 246);
   --popover-foreground: oklch(0.96 0.01 247.9);
@@ -135,6 +143,10 @@
   --sidebar-accent-foreground: oklch(0.96 0.01 247.9);
   --sidebar-border: oklch(1 0 0 / 12%);
   --sidebar-ring: oklch(0.6 0.03 264.4);
+  --hivis: oklch(0.86 0.18 92);
+  --hivis-foreground: oklch(0.18 0.04 92);
+  --success: oklch(0.72 0.17 152);
+  --success-foreground: oklch(0.16 0.03 152);
 }
 
 @layer base {
@@ -149,9 +161,55 @@
     font-family: var(--font-sans);
   }
 
-  h1, h2, h3, h4, h5, h6 {
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-family: var(--font-heading);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+}
+
+@layer components {
+  /* Small uppercase condensed label used for section + column headers.
+     Borrowed from equipment plates and job tickets. */
+  .eyebrow {
     font-family: var(--font-heading);
     font-weight: 600;
-    letter-spacing: -0.01em;
+    font-size: 0.6875rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    line-height: 1;
+  }
+
+  /* Status spine: the coloured edge that runs down every job card/row. */
+  .spine {
+    box-shadow: inset 4px 0 0 0 var(--spine-color, var(--border));
+  }
+
+  /* Slow breathing pulse for the single job currently in progress. */
+  .live-dot {
+    animation: live-pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes live-pulse {
+    0%,
+    100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+    50% {
+      opacity: 0.45;
+      transform: scale(0.82);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .live-dot {
+      animation: none;
+    }
   }
 }

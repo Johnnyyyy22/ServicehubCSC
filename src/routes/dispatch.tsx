@@ -70,6 +70,49 @@ type ActivityEvent = {
   ok: boolean;
 };
 
+/**
+ * Matches the phone formats that actually turn up in the Remarks column:
+ * 09171234567, 0917-123-4567, +63 917 123 4567, (049) 502-1234, 8123-4567.
+ */
+const PHONE_RE =
+  /(?:\+63|0)[\d\s\-().]{7,14}\d|\(0\d{2,3}\)[\s-]?\d{3}[\s-]?\d{4}|\b8\d{3}[\s-]\d{4}\b/g;
+
+/**
+ * Splits free text into plain strings and tappable tel: links so an engineer
+ * can dial the site contact without retyping the number.
+ */
+function linkifyPhones(text: string) {
+  if (!text) return text;
+  const out: Array<string | { raw: string; dial: string }> = [];
+  let last = 0;
+  for (const m of text.matchAll(PHONE_RE)) {
+    const raw = m[0].trim();
+    const digits = raw.replace(/\D/g, "");
+    // Guard against catching order numbers or dates.
+    if (digits.length < 7 || digits.length > 13) continue;
+    const start = m.index ?? 0;
+    if (start > last) out.push(text.slice(last, start));
+    out.push({ raw, dial: raw.startsWith("+") ? `+${digits}` : digits });
+    last = start + m[0].length;
+  }
+  if (last === 0) return text;
+  if (last < text.length) out.push(text.slice(last));
+  return out.map((part, i) =>
+    typeof part === "string" ? (
+      part
+    ) : (
+      <a
+        key={i}
+        href={`tel:${part.dial}`}
+        onClick={(e) => e.stopPropagation()}
+        className="font-semibold text-primary underline underline-offset-2"
+      >
+        {part.raw}
+      </a>
+    ),
+  );
+}
+
 /** Formats a millisecond duration as "1h 17m" / "43m" / "16s". */
 function formatDuration(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -91,6 +134,7 @@ function DispatchPage() {
   const [now, setNow] = useState<Date | null>(null);
   const [loginTimes, setLoginTimes] = useState<Record<string, string>>({});
   const [logoutTimes, setLogoutTimes] = useState<Record<string, string>>({});
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [loginAt, setLoginAt] = useState<Record<string, number>>({});
   const [duration, setDuration] = useState<Record<string, string>>({});
   const [picked, setPicked] = useState<Record<string, StatusOption>>({});
@@ -433,11 +477,6 @@ function DispatchPage() {
   const completedCount = jobs.filter((j) =>
     Boolean(logoutTimes[j.rowId]),
   ).length;
-  const onSiteCount = jobs.filter(
-    (j) =>
-      (Boolean(loginTimes[j.rowId]) || Boolean(locks[j.rowId])) &&
-      !logoutTimes[j.rowId],
-  ).length;
 
   /**
    * Every job is in exactly one of three states. Both the mobile cards and the
@@ -458,7 +497,7 @@ function DispatchPage() {
     if (loggedIn)
       return {
         key: "onsite" as const,
-        label: "On site",
+        label: "In progress",
         spine: "var(--hivis)",
         chip: "bg-hivis text-hivis-foreground",
         dot: "bg-hivis-foreground live-dot",
@@ -504,7 +543,7 @@ function DispatchPage() {
                 {offline && (
                   <span className="eyebrow flex items-center gap-2 bg-hivis px-3 py-2 text-hivis-foreground">
                     <span className="live-dot inline-block h-2 w-2 bg-hivis-foreground" />
-                    Offline
+                    No connection
                   </span>
                 )}
                 <Button
@@ -546,14 +585,13 @@ function DispatchPage() {
           </div>
 
           {/* Duty bar — the day at a glance, before any scrolling. */}
-          <dl className="mt-5 grid grid-cols-3 border border-border bg-card">
+          <dl className="mt-5 grid grid-cols-2 border border-border bg-card">
             {[
               {
                 label: "Assigned",
                 value: jobs.length,
                 tone: "text-foreground",
               },
-              { label: "On site", value: onSiteCount, tone: "text-primary" },
               {
                 label: "Completed",
                 value: completedCount,
@@ -686,6 +724,9 @@ function DispatchPage() {
                 const unconfirmed = Boolean(lock && !lock.syncedAt);
                 const busy = saving === job.rowId;
                 const state = jobState(job.rowId);
+                // The job you're currently working opens by default; the rest
+                // stay collapsed so the day fits on one screen.
+                const isOpen = expanded[job.rowId] ?? (loggedIn && !loggedOut);
                 return (
                   <article
                     key={job.rowId}
@@ -694,7 +735,18 @@ function DispatchPage() {
                       { "--spine-color": state.spine } as React.CSSProperties
                     }
                   >
-                    <div className="flex items-start justify-between gap-3 border-b border-border px-4 py-3 pl-5">
+                    <button
+                      type="button"
+                      aria-expanded={isOpen}
+                      aria-controls={`job-details-${job.rowId}`}
+                      onClick={() =>
+                        setExpanded((e) => ({
+                          ...e,
+                          [job.rowId]: !e[job.rowId],
+                        }))
+                      }
+                      className="flex w-full items-start justify-between gap-3 border-b border-border px-4 py-3 pl-5 text-left transition-colors hover:bg-muted/50"
+                    >
                       <div className="min-w-0">
                         <h3 className="truncate text-lg leading-tight text-foreground">
                           {job.account}
@@ -703,66 +755,79 @@ function DispatchPage() {
                           {job.model}
                         </p>
                       </div>
-                      <span
-                        className={`eyebrow flex shrink-0 items-center gap-1.5 px-2 py-1.5 ${state.chip}`}
-                      >
+                      <span className="flex shrink-0 items-center gap-2">
                         <span
-                          className={`inline-block h-1.5 w-1.5 ${state.dot}`}
-                        />
-                        {state.label}
+                          className={`eyebrow flex items-center gap-1.5 px-2 py-1.5 ${state.chip}`}
+                        >
+                          <span
+                            className={`inline-block h-1.5 w-1.5 ${state.dot}`}
+                          />
+                          {state.label}
+                        </span>
+                        <span
+                          aria-hidden="true"
+                          className={`text-muted-foreground transition-transform ${isOpen ? "rotate-180" : ""}`}
+                        >
+                          ▾
+                        </span>
                       </span>
-                    </div>
+                    </button>
 
-                    <dl className="space-y-2.5 px-4 py-3 pl-5 text-sm">
-                      <div>
-                        <dt className="eyebrow text-muted-foreground">
-                          Purpose
-                        </dt>
-                        <dd className="mt-1 text-foreground">
-                          {job.purpose || "—"}
-                        </dd>
-                      </div>
-                      {job.remarks && (
+                    {isOpen && (
+                      <dl
+                        id={`job-details-${job.rowId}`}
+                        className="space-y-2.5 px-4 py-3 pl-5 text-sm"
+                      >
                         <div>
                           <dt className="eyebrow text-muted-foreground">
-                            Remarks / contact / address
+                            Purpose
                           </dt>
-                          <dd className="mt-1 whitespace-pre-wrap text-muted-foreground">
-                            {job.remarks}
+                          <dd className="mt-1 text-foreground">
+                            {job.purpose || "—"}
                           </dd>
                         </div>
-                      )}
-                      {(loggedIn || loggedOut) && (
-                        <div className="flex gap-6 border-t border-border pt-2.5">
+                        {job.remarks && (
                           <div>
                             <dt className="eyebrow text-muted-foreground">
-                              In
+                              Remarks / contact / address
                             </dt>
-                            <dd className="mt-1 tabular-nums text-foreground">
-                              {loginTimes[job.rowId] ?? "—"}
+                            <dd className="mt-1 whitespace-pre-wrap text-muted-foreground">
+                              {linkifyPhones(job.remarks)}
                             </dd>
                           </div>
-                          <div>
-                            <dt className="eyebrow text-muted-foreground">
-                              Out
-                            </dt>
-                            <dd className="mt-1 tabular-nums text-foreground">
-                              {logoutTimes[job.rowId] ?? "—"}
-                            </dd>
-                          </div>
-                          {duration[job.rowId] && (
+                        )}
+                        {(loggedIn || loggedOut) && (
+                          <div className="flex gap-6 border-t border-border pt-2.5">
                             <div>
                               <dt className="eyebrow text-muted-foreground">
-                                On site
+                                In
                               </dt>
-                              <dd className="mt-1 font-semibold tabular-nums text-foreground">
-                                {duration[job.rowId]}
+                              <dd className="mt-1 tabular-nums text-foreground">
+                                {loginTimes[job.rowId] ?? "—"}
                               </dd>
                             </div>
-                          )}
-                        </div>
-                      )}
-                    </dl>
+                            <div>
+                              <dt className="eyebrow text-muted-foreground">
+                                Out
+                              </dt>
+                              <dd className="mt-1 tabular-nums text-foreground">
+                                {logoutTimes[job.rowId] ?? "—"}
+                              </dd>
+                            </div>
+                            {duration[job.rowId] && (
+                              <div>
+                                <dt className="eyebrow text-muted-foreground">
+                                  Duration
+                                </dt>
+                                <dd className="mt-1 font-semibold tabular-nums text-foreground">
+                                  {duration[job.rowId]}
+                                </dd>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </dl>
+                    )}
 
                     <div className="space-y-2 border-t border-border bg-muted/40 px-4 py-3 pl-5">
                       {unconfirmed && (
@@ -922,7 +987,7 @@ function DispatchPage() {
                           {job.purpose}
                         </td>
                         <td className="max-w-sm px-4 py-3 whitespace-pre-wrap text-muted-foreground">
-                          {job.remarks}
+                          {linkifyPhones(job.remarks)}
                         </td>
                         <td className="px-4 py-3">
                           <Select
@@ -1003,7 +1068,7 @@ function DispatchPage() {
                               </span>
                               {duration[job.rowId] && (
                                 <span className="text-muted-foreground">
-                                  {duration[job.rowId]} on site
+                                  {duration[job.rowId]} total
                                 </span>
                               )}
                             </span>

@@ -79,10 +79,7 @@ function LoginPage() {
             alt="Service Hub logo"
             className="mx-auto h-12 w-auto"
           />
-          <p className="eyebrow mt-5 text-center text-primary">
-            Field dispatch · Engineer sign in
-          </p>
-          <p className="mt-4 border-t border-border pt-4 text-center text-sm leading-relaxed text-muted-foreground">
+          <p className="mt-5 border-t border-border pt-4 text-center text-sm leading-relaxed text-muted-foreground">
             When others rest, We rise! — Service Hub, the home of unstoppable
             service.
           </p>

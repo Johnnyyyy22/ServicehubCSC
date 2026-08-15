@@ -8,6 +8,7 @@ import {
   getEngineer,
   shouldNotifyStatus,
   stampTime,
+  dayKey,
   CONFLICT,
   STATUS_OPTIONS,
   type DispatchJob,
@@ -38,6 +39,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
 
 export const Route = createFileRoute("/dispatch")({
   head: () => ({
@@ -142,10 +150,14 @@ function DispatchPage() {
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [offline, setOffline] = useState(false);
   const [activity, setActivity] = useState<ActivityEvent[]>([]);
+  const [completedOpen, setCompletedOpen] = useState(false);
   const inFlight = useRef<
     Map<string, Omit<QueueItem, "id" | "attempts" | "acked" | "nextAt">>
   >(new Map());
   const forced = useRef<Set<string>>(new Set());
+  // Tracks the calendar day the screen is currently showing, so a midnight
+  // rollover can be detected and the board reset for the new day's dispatch.
+  const shownDay = useRef<string>(dayKey(new Date()));
 
   const lockedRow = Object.keys(locks)[0] ?? null;
   const activeJob =
@@ -248,13 +260,35 @@ function DispatchPage() {
       const all = await fetchDispatchJobs();
       const idKey = id.trim().toLowerCase();
       const nameKey = name.trim().toLowerCase();
-      const mine = all.filter(
-        (j) =>
-          (j.engineerId.trim().toLowerCase() === idKey ||
-            j.engineer.trim().toLowerCase() === nameKey) &&
-          (j.account || j.model || j.purpose),
-      );
+      const todayKey = dayKey(new Date());
+      const mine = all.filter((j) => {
+        const isMine =
+          j.engineerId.trim().toLowerCase() === idKey ||
+          j.engineer.trim().toLowerCase() === nameKey;
+        const hasContent = Boolean(j.account || j.model || j.purpose);
+        // Only show today's dispatch. If a row's date is blank or doesn't
+        // parse, show it anyway rather than risk hiding real assigned work.
+        const rowDay = j.date ? dayKey(j.date) : "";
+        const isToday = !rowDay || rowDay === todayKey;
+        return isMine && hasContent && isToday;
+      });
       setJobs(mine);
+
+      // The sheet is the source of truth. Seed the in/out stamps from it so a
+      // refresh or a fresh sign-in doesn't show finished jobs as "Not started".
+      const sheetIn: Record<string, string> = {};
+      const sheetOut: Record<string, string> = {};
+      for (const j of mine) {
+        const i = j.logIn?.trim();
+        const o = j.logOut?.trim();
+        if (i) sheetIn[j.rowId] = i;
+        if (o) sheetOut[j.rowId] = o;
+      }
+      // Locally-recorded stamps win: a queued offline event isn't on the sheet
+      // yet, and overwriting it here would make the job look un-started.
+      setLoginTimes((t) => ({ ...sheetIn, ...t }));
+      setLogoutTimes((t) => ({ ...sheetOut, ...t }));
+
       return mine;
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load jobs.");
@@ -319,6 +353,33 @@ function DispatchPage() {
     if (!engineer) return;
     void load(engineer.id, engineer.name).then(reconcile);
   }, [engineer, load, reconcile]);
+
+  /* ------------------------ midnight rollover ------------------------ */
+  useEffect(() => {
+    if (!now || !engineer) return;
+    const key = dayKey(now);
+    if (key === shownDay.current) return;
+    shownDay.current = key;
+    // A new calendar day means a fresh dispatch. Clear yesterday's board —
+    // but keep any job the engineer is actively logged into right now, so a
+    // shift that happens to cross midnight doesn't lose its start time.
+    setLoginTimes((t) => {
+      const kept: Record<string, string> = {};
+      for (const row of Object.keys(locks)) if (t[row]) kept[row] = t[row];
+      return kept;
+    });
+    setLoginAt((t) => {
+      const kept: Record<string, number> = {};
+      for (const row of Object.keys(locks)) if (t[row]) kept[row] = t[row];
+      return kept;
+    });
+    setLogoutTimes({});
+    setDuration({});
+    setPicked({});
+    setExpanded({});
+    setCompletedOpen(false);
+    void load(engineer.id, engineer.name);
+  }, [now, engineer, locks, load]);
 
   /* ----------------------------- actions ----------------------------- */
   async function handleStatus(job: DispatchJob, status: StatusOption) {
@@ -474,9 +535,11 @@ function DispatchPage() {
   }
 
   const pendingCount = queue.filter((q) => q.attempts < MAX_ATTEMPTS).length;
-  const completedCount = jobs.filter((j) =>
-    Boolean(logoutTimes[j.rowId]),
-  ).length;
+  // "Completed" = logged out, regardless of which status was picked — Running
+  // Good, Backlog, whatever. The status dropdown is required before log-out,
+  // so a logged-out job always has one.
+  const completedJobs = jobs.filter((j) => Boolean(logoutTimes[j.rowId]));
+  const completedCount = completedJobs.length;
 
   /**
    * Every job is in exactly one of three states. Both the mobile cards and the
@@ -517,10 +580,7 @@ function DispatchPage() {
         <header className="border-b-2 border-foreground pb-5">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="min-w-0">
-              <p className="eyebrow text-primary">
-                Service Hub · Field dispatch
-              </p>
-              <h1 className="mt-2 text-4xl leading-none text-foreground sm:text-5xl">
+              <h1 className="text-4xl leading-none text-foreground sm:text-5xl">
                 Daily dispatch
               </h1>
               <p className="mt-2 text-sm text-muted-foreground">
@@ -586,32 +646,94 @@ function DispatchPage() {
 
           {/* Duty bar — the day at a glance, before any scrolling. */}
           <dl className="mt-5 grid grid-cols-2 border border-border bg-card">
-            {[
-              {
-                label: "Assigned",
-                value: jobs.length,
-                tone: "text-foreground",
-              },
-              {
-                label: "Completed",
-                value: completedCount,
-                tone: "text-success",
-              },
-            ].map((stat, i) => (
-              <div
-                key={stat.label}
-                className={`px-4 py-3 ${i > 0 ? "border-l border-border" : ""}`}
-              >
-                <dt className="eyebrow text-muted-foreground">{stat.label}</dt>
-                <dd
-                  className={`mt-1.5 text-3xl leading-none font-bold tabular-nums ${stat.tone}`}
-                >
-                  {stat.value}
-                </dd>
-              </div>
-            ))}
+            <div className="px-4 py-3">
+              <dt className="eyebrow text-muted-foreground">Assigned</dt>
+              <dd className="mt-1.5 text-3xl leading-none font-bold tabular-nums text-foreground">
+                {jobs.length}
+              </dd>
+            </div>
+            <button
+              type="button"
+              onClick={() => setCompletedOpen(true)}
+              aria-haspopup="dialog"
+              className="border-l border-border px-4 py-3 text-left transition-colors hover:bg-muted/50"
+            >
+              <dt className="eyebrow flex items-center gap-1 text-muted-foreground">
+                Completed
+                <span aria-hidden="true" className="text-success">
+                  ›
+                </span>
+              </dt>
+              <dd className="mt-1.5 text-3xl leading-none font-bold tabular-nums text-success">
+                {completedCount}
+              </dd>
+            </button>
           </dl>
         </header>
+
+        <Dialog open={completedOpen} onOpenChange={setCompletedOpen}>
+          <DialogContent className="max-h-[80vh] max-w-lg overflow-y-auto border-2 border-foreground">
+            <DialogHeader>
+              <DialogTitle className="font-heading text-2xl">
+                Completed today
+              </DialogTitle>
+              <DialogDescription>
+                Every job you've logged out of today, with its status and time
+                on site. This clears automatically at midnight — the sheet keeps
+                the permanent record.
+              </DialogDescription>
+            </DialogHeader>
+            {completedJobs.length === 0 ? (
+              <p className="border border-border bg-muted/40 px-4 py-8 text-center text-sm text-muted-foreground">
+                No completed jobs yet today.
+              </p>
+            ) : (
+              <ul className="space-y-3">
+                {completedJobs.map((job) => (
+                  <li
+                    key={job.rowId}
+                    className="spine border border-border bg-card px-4 py-3"
+                    style={
+                      {
+                        "--spine-color": "var(--success)",
+                      } as React.CSSProperties
+                    }
+                  >
+                    <p className="font-semibold text-foreground">
+                      {job.account}
+                    </p>
+                    <p className="text-xs text-muted-foreground">{job.model}</p>
+                    <p className="mt-2 text-sm text-foreground">
+                      {picked[job.rowId] ?? job.status ?? "—"}
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 border-t border-border pt-2 text-xs text-muted-foreground">
+                      <span>
+                        In{" "}
+                        <span className="tabular-nums text-foreground">
+                          {loginTimes[job.rowId] ?? "—"}
+                        </span>
+                      </span>
+                      <span>
+                        Out{" "}
+                        <span className="tabular-nums text-foreground">
+                          {logoutTimes[job.rowId] ?? "—"}
+                        </span>
+                      </span>
+                      {duration[job.rowId] && (
+                        <span>
+                          Duration{" "}
+                          <span className="font-semibold tabular-nums text-foreground">
+                            {duration[job.rowId]}
+                          </span>
+                        </span>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </DialogContent>
+        </Dialog>
 
         {pendingCount > 0 && !stalled && (
           <p className="mt-4 border border-accent bg-accent/20 px-4 py-3 text-sm text-accent-foreground">

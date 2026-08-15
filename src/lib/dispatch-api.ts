@@ -31,12 +31,21 @@ export type Engineer = { id: string; name: string; email: string };
 /** Reads the signed-in engineer from localStorage, or null. */
 export function getEngineer(): Engineer | null {
   if (typeof localStorage === "undefined") return null;
-  const id = localStorage.getItem("EngineerID") ?? localStorage.getItem("engineerID") ?? "";
+  const id =
+    localStorage.getItem("EngineerID") ??
+    localStorage.getItem("engineerID") ??
+    "";
   if (!id.trim()) return null;
   return {
     id,
-    name: localStorage.getItem("EngineerName") ?? localStorage.getItem("engineerName") ?? "",
-    email: localStorage.getItem("engineerEmail") ?? localStorage.getItem("EngineerEmail") ?? "",
+    name:
+      localStorage.getItem("EngineerName") ??
+      localStorage.getItem("engineerName") ??
+      "",
+    email:
+      localStorage.getItem("engineerEmail") ??
+      localStorage.getItem("EngineerEmail") ??
+      "",
   };
 }
 
@@ -124,7 +133,12 @@ export async function fetchLoginRows(): Promise<Row[]> {
   if (!rows.length) rows = await getRows();
 
   // Skip header row if present.
-  if (rows.length && String(rows[0]?.[0] ?? "").toLowerCase().includes("engineer")) {
+  if (
+    rows.length &&
+    String(rows[0]?.[0] ?? "")
+      .toLowerCase()
+      .includes("engineer")
+  ) {
     return rows.slice(1);
   }
   return rows;
@@ -141,7 +155,25 @@ export type DispatchJob = {
   status: string;
   logIn: string;
   logOut: string;
+  /** Raw value of the sheet's Date column, unparsed. Use dayKey() to compare. */
+  date: string;
 };
+
+/**
+ * Normalizes a date-ish value (a sheet cell or a JS Date) to a "YYYY-MM-DD"
+ * key using LOCAL time, so same-day comparisons aren't thrown off by the UTC
+ * offset in Apps Script's ISO strings. Returns "" when the value is blank or
+ * can't be parsed — callers should treat that as "unknown" and fail open
+ * (i.e. still show the row) rather than silently hiding real assignments.
+ */
+export function dayKey(value: string | Date): string {
+  const d = value instanceof Date ? value : new Date(String(value).trim());
+  if (isNaN(d.getTime())) return "";
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
 
 /**
  * Fixed column layout returned by the Apps Script's doGet(), which always
@@ -171,7 +203,8 @@ export async function fetchDispatchJobs(): Promise<DispatchJob[]> {
   const rows = await getRows({ sheet: "Daily Dispatch" });
   if (!rows.length) return [];
 
-  const pick = (row: Row, i: number) => (i >= 0 ? String(row[i] ?? "").trim() : "");
+  const pick = (row: Row, i: number) =>
+    i >= 0 ? String(row[i] ?? "").trim() : "";
 
   // Time values from the sheet arrive as ISO strings (e.g. "2026-08-12T07:49:57.000Z")
   // after a refresh or sign-out. Format them back to a readable 12-hour time so the
@@ -206,6 +239,7 @@ export async function fetchDispatchJobs(): Promise<DispatchJob[]> {
     status: pick(row, COL.status),
     logIn: pickTime(row, COL.logIn),
     logOut: pickTime(row, COL.logOut),
+    date: pick(row, COL.date),
   }));
 }
 
@@ -259,7 +293,12 @@ export async function postToScript(
       notified = /notify\s*[:=]\s*"?ok/i.test(text);
     }
     const conflict = result.toUpperCase().includes(CONFLICT);
-    return { ok: res.ok && !conflict, result: conflict ? CONFLICT : result, notified, acked: true };
+    return {
+      ok: res.ok && !conflict,
+      result: conflict ? CONFLICT : result,
+      notified,
+      acked: true,
+    };
   } catch {
     // Opaque fallback: the write still lands, we just cannot read the echo.
     await fetch(API, {

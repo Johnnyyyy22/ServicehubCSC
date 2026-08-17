@@ -34,6 +34,73 @@ function writeJson(key: string, value: unknown) {
   }
 }
 
+/* ------------------------- offline credentials ------------------------- */
+/**
+ * Lets an engineer sign in with zero connectivity — but only on a device
+ * that has already signed in successfully at least once while online.
+ * There's no way around that constraint: validating a password against a
+ * remote sheet requires reaching that sheet at least once, so a brand-new
+ * phone's very first login still needs a moment of real signal.
+ *
+ * The password itself is never cached — only a SHA-256 hash of it, keyed
+ * by username. This is weaker than a proper server-side salted hash (the
+ * Users tab stores plaintext passwords, which this app doesn't control),
+ * but it means a lost or inspected phone doesn't hand over anyone's real
+ * password in the clear.
+ */
+const OFFLINE_CREDS_KEY = "dispatch.offlineCreds";
+
+type OfflineCredEntry = {
+  passwordHash: string;
+  engineerId: string;
+  engineerName: string;
+  engineerEmail: string;
+};
+
+async function sha256Hex(text: string): Promise<string> {
+  const bytes = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/** Call this right after a successful ONLINE login. */
+export async function cacheOfflineCredential(
+  username: string,
+  password: string,
+  engineerId: string,
+  engineerName: string,
+  engineerEmail: string,
+): Promise<void> {
+  if (typeof crypto === "undefined" || !crypto.subtle) return; // requires HTTPS/localhost
+  const key = username.trim().toLowerCase();
+  if (!key) return;
+  const passwordHash = await sha256Hex(password);
+  const all = readJson<Record<string, OfflineCredEntry>>(OFFLINE_CREDS_KEY, {});
+  all[key] = { passwordHash, engineerId, engineerName, engineerEmail };
+  writeJson(OFFLINE_CREDS_KEY, all);
+}
+
+/**
+ * Checks a login attempt against the cached credential for this username.
+ * Returns the cached engineer identity on a match, or null if there's no
+ * cached entry for this username or the password doesn't match it.
+ */
+export async function verifyOfflineCredential(
+  username: string,
+  password: string,
+): Promise<OfflineCredEntry | null> {
+  if (typeof crypto === "undefined" || !crypto.subtle) return null;
+  const key = username.trim().toLowerCase();
+  if (!key) return null;
+  const all = readJson<Record<string, OfflineCredEntry>>(OFFLINE_CREDS_KEY, {});
+  const entry = all[key];
+  if (!entry) return null;
+  const hash = await sha256Hex(password);
+  return hash === entry.passwordHash ? entry : null;
+}
+
 /* ------------------------------- locks ------------------------------- */
 
 export function readLocks(): LockMap {
@@ -90,6 +157,7 @@ export type QueueItem = {
   force?: number;
   date?: string;
   account?: string;
+  machine?: string;
 };
 
 /** 15s, 30s, 1m, 2m, 5m — the last delay repeats until MAX_ATTEMPTS. */
@@ -108,7 +176,9 @@ export function writeQueue(items: QueueItem[]) {
   writeJson(QUEUE_KEY, items);
 }
 
-export function enqueue(item: Omit<QueueItem, "id" | "attempts" | "acked" | "nextAt">) {
+export function enqueue(
+  item: Omit<QueueItem, "id" | "attempts" | "acked" | "nextAt">,
+) {
   const queued: QueueItem = {
     ...item,
     id: `${item.row}-${item.action}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -133,11 +203,18 @@ export function resetQueueBackoff() {
 }
 
 /** Sends one queued item. Returns the script result, or null when it failed. */
-export async function sendQueueItem(item: QueueItem): Promise<PostResult | null> {
+export async function sendQueueItem(
+  item: QueueItem,
+): Promise<PostResult | null> {
   try {
     const result = await postToScript({
       row: item.row,
       action: item.action,
+      // account/machine let the backend confirm this row still belongs to
+      // this engineer before writing, instead of trusting a row number
+      // that may have gone stale while this item sat in the queue.
+      account: item.account,
+      machine: item.machine,
       time: item.time,
       ...(item.status ? { status: item.status } : {}),
       ...(item.date ? { date: item.date } : {}),
@@ -173,7 +250,9 @@ export async function flushQueue(
 
     const attempts = item.attempts + 1;
     queue = readQueue().map((q) =>
-      q.id === item.id ? { ...q, attempts, nextAt: Date.now() + backoffFor(attempts) } : q,
+      q.id === item.id
+        ? { ...q, attempts, nextAt: Date.now() + backoffFor(attempts) }
+        : q,
     );
     writeQueue(queue);
   }

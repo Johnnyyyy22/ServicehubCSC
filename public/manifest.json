@@ -1,0 +1,13 @@
+{
+  "name": "ServiceHub",
+  "short_name": "ServiceHub",
+  "description": "Field dispatch for ServiceHub engineers.",
+  "start_url": "/dispatch",
+  "display": "standalone",
+  "background_color": "#161826",
+  "theme_color": "#161826",
+  "icons": [
+    { "src": "/favicon.png", "sizes": "64x64", "type": "image/png", "purpose": "any" },
+    { "src": "/logo.png", "sizes": "1527x799", "type": "image/png", "purpose": "any" }
+  ]
+}

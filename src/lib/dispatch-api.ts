@@ -72,6 +72,26 @@ function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
+/** Races a promise against a timeout, throwing if the timeout wins. Used so
+ * a dead connection doesn't leave the login screen hanging through
+ * fetchLoginRows' full internal retry sequence before falling back to an
+ * offline sign-in. */
+export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timeout")), ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
 async function getRows(params: Record<string, string> = {}): Promise<Row[]> {
   const qs = new URLSearchParams({ ...params, t: String(Date.now()) });
   const res = await fetch(`${SHEET_URL}?${qs}`);
@@ -229,6 +249,13 @@ export async function fetchDispatchJobs(): Promise<DispatchJob[]> {
   };
 
   return rows.map((row, i) => ({
+    // rows[0] is sheet row 2 (the Apps Script's doGet() already strips the
+    // header row before this array reaches us). The write endpoint's
+    // doPost() computes `r = Number(p.row) + 1` — it already adds its own
+    // +1 to convert this into a real sheet row. So rowId = i+1 is correct:
+    // i=0 -> rowId "1" -> backend r = 2 (sheet row 2). Do NOT change this
+    // to i+2 without also removing the backend's own +1, or every write
+    // will land one row past its target.
     rowId: String(i + 1),
     engineerId: pick(row, COL.engineerId),
     engineer: pick(row, COL.engineer),
@@ -255,6 +282,10 @@ export type PostResult = {
 };
 
 export const CONFLICT = "ALREADY_LOGGED_IN";
+/** The backend couldn't find a row matching this engineer + account —
+ * the schedule changed since this job list loaded. The write was
+ * refused rather than risk landing on someone else's row. */
+export const ROW_NOT_FOUND = "ROW_NOT_FOUND";
 
 /**
  * Single POST helper for every script call. Always attaches the engineer's
@@ -293,9 +324,10 @@ export async function postToScript(
       notified = /notify\s*[:=]\s*"?ok/i.test(text);
     }
     const conflict = result.toUpperCase().includes(CONFLICT);
+    const notFound = result.toUpperCase().includes(ROW_NOT_FOUND);
     return {
-      ok: res.ok && !conflict,
-      result: conflict ? CONFLICT : result,
+      ok: res.ok && !conflict && !notFound,
+      result: conflict ? CONFLICT : notFound ? ROW_NOT_FOUND : result,
       notified,
       acked: true,
     };
@@ -320,11 +352,18 @@ export function stampTime(at: Date = new Date()) {
   });
 }
 
-export async function updateJobStatus(rowId: string, status: StatusOption) {
+export async function updateJobStatus(
+  rowId: string,
+  status: StatusOption,
+  account: string,
+  machine: string,
+) {
   return postToScript({
     row: rowId,
     action: "status",
     status,
+    account,
+    machine,
     notify: shouldNotifyStatus(status) ? 1 : 0,
   });
 }
@@ -332,6 +371,8 @@ export async function updateJobStatus(rowId: string, status: StatusOption) {
 export async function logJobTime(
   rowId: string,
   action: "login" | "logout",
+  account: string,
+  machine: string,
   status?: string,
   force?: boolean,
 ) {
@@ -339,6 +380,8 @@ export async function logJobTime(
   return postToScript({
     row: rowId,
     action,
+    account,
+    machine,
     time: stampTime(now),
     ...(action === "logout" ? { date: now.toLocaleDateString("en-US") } : {}),
     ...(status ? { status } : {}),

@@ -1,6 +1,11 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
-import { fetchLoginRows } from "@/lib/dispatch-api";
+import { toast } from "sonner";
+import { fetchLoginRows, withTimeout } from "@/lib/dispatch-api";
+import {
+  cacheOfflineCredential,
+  verifyOfflineCredential,
+} from "@/lib/dispatch-store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -38,90 +43,150 @@ function LoginPage() {
     e.preventDefault();
     setError("");
     setLoading(true);
-    try {
-      const rows = await fetchLoginRows();
-      const u = username.trim().toLowerCase();
-      const p = password.trim().toLowerCase();
-      const match = rows.find(
-        (r) =>
-          String(r[2]).trim().toLowerCase() === u &&
-          String(r[3]).trim().toLowerCase() === p,
-      );
-      if (!match) {
-        setError("Invalid login");
+    const u = username.trim();
+    const p = password.trim();
+
+    // Skip straight to the offline path if the browser already knows
+    // there's no connection — no point waiting on a fetch that can't
+    // succeed. If the browser THINKS it's online but actually isn't (a
+    // common lie on flaky mobile signal), the timeout below catches that.
+    const knownOffline =
+      typeof navigator !== "undefined" && navigator.onLine === false;
+
+    if (!knownOffline) {
+      try {
+        const rows = await withTimeout(fetchLoginRows(), 15_000);
+        const uKey = u.toLowerCase();
+        const pKey = p.toLowerCase();
+        const match = rows.find(
+          (r) =>
+            String(r[2]).trim().toLowerCase() === uKey &&
+            String(r[3]).trim().toLowerCase() === pKey,
+        );
+        if (!match) {
+          setError("Invalid login");
+          setLoading(false);
+          return;
+        }
+        const engineerId = String(match[0]);
+        const engineerName = String(match[1] ?? "");
+        // Column E of the Users tab holds the engineer's email; fall back to
+        // any cell in the row that looks like an address so notifications
+        // still work.
+        const emailCell =
+          match.slice(4).find((c) => String(c ?? "").includes("@")) ??
+          match.find((c) => String(c ?? "").includes("@")) ??
+          "";
+        const engineerEmail = String(emailCell).trim();
+
+        localStorage.setItem("EngineerID", engineerId);
+        localStorage.setItem("EngineerName", engineerName);
+        localStorage.setItem("engineerEmail", engineerEmail);
+        // So this device can sign this engineer in again with zero signal.
+        void cacheOfflineCredential(
+          u,
+          p,
+          engineerId,
+          engineerName,
+          engineerEmail,
+        );
+        navigate({ to: "/dispatch" });
         return;
+      } catch {
+        // Fall through to the offline path below — could be a dead
+        // connection, a timeout, or the script being unreachable.
       }
-      localStorage.setItem("EngineerID", String(match[0]));
-      localStorage.setItem("EngineerName", String(match[1] ?? ""));
-      // Column E of the Users tab holds the engineer's email; fall back to any
-      // cell in the row that looks like an address so notifications still work.
-      const emailCell =
-        match.slice(4).find((c) => String(c ?? "").includes("@")) ??
-        match.find((c) => String(c ?? "").includes("@")) ??
-        "";
-      localStorage.setItem("engineerEmail", String(emailCell).trim());
-      navigate({ to: "/dispatch" });
-    } catch {
-      setError("Invalid login");
-    } finally {
-      setLoading(false);
     }
+
+    // Offline path: check against whatever this device last verified
+    // online for this username.
+    const cached = await verifyOfflineCredential(u, p);
+    if (cached) {
+      localStorage.setItem("EngineerID", cached.engineerId);
+      localStorage.setItem("EngineerName", cached.engineerName);
+      localStorage.setItem("engineerEmail", cached.engineerEmail);
+      toast.info("Signed in offline — this will sync once you're back online.");
+      navigate({ to: "/dispatch" });
+      setLoading(false);
+      return;
+    }
+
+    setError(
+      knownOffline || !navigator.onLine
+        ? "No connection, and this device hasn't signed you in before — connect once, then try again."
+        : "Invalid login",
+    );
+    setLoading(false);
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-background px-4">
-      <div className="w-full max-w-sm border-2 border-foreground bg-card shadow-lg">
-        <div className="h-2 w-full bg-hivis" />
-        <div className="p-8">
-          <h1 className="sr-only">Service Hub</h1>
+    <main className="hero-glow flex min-h-screen items-center justify-center px-6 py-12">
+      <div className="flex w-full max-w-sm flex-col gap-7">
+        <h1 className="sr-only">Service Hub</h1>
+        <div className="flex flex-col items-center gap-2.5">
           <img
             src="/logo.png"
             alt="Service Hub logo"
-            className="mx-auto h-12 w-auto"
+            className="h-14 w-auto mix-blend-lighten"
           />
-          <p className="mt-5 border-t border-border pt-4 text-center text-sm leading-relaxed text-muted-foreground">
-            When others rest, We rise! — Service Hub, the home of unstoppable
-            service.
+          <p className="text-center text-[11.5px] leading-relaxed text-neutral-500">
+            When others rest, we rise.
+            <br />
+            Service Hub — the home of unstoppable service.
           </p>
-          <form onSubmit={handleSubmit} className="mt-8 space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="username">Username</Label>
-              <Input
-                className="h-11"
-                id="username"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                autoComplete="username"
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="password">Password</Label>
-              <Input
-                className="h-11"
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete="current-password"
-                required
-              />
-            </div>
-            {error && (
-              <p className="border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm font-medium text-destructive">
-                {error} — check your username and password, then try again.
-              </p>
-            )}
-            <Button
-              type="submit"
-              className="h-12 w-full text-base font-semibold"
-              disabled={loading}
-            >
-              {loading ? "Checking…" : "Log in"}
-            </Button>
-          </form>
         </div>
-        <p className="border-t border-border px-8 py-3 text-center text-[11px] text-muted-foreground">
+
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="username" className="text-xs text-neutral-400">
+              Username
+            </Label>
+            <Input
+              className="h-11"
+              id="username"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              autoComplete="username"
+              required
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="password" className="text-xs text-neutral-400">
+              Password
+            </Label>
+            <Input
+              className="h-11"
+              id="password"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="current-password"
+              required
+            />
+          </div>
+          {error && (
+            <p className="text-[13px] text-accent-300">
+              {error} — check your username and password, then try again.
+            </p>
+          )}
+          <Button
+            type="submit"
+            className="mt-1 h-11 w-full text-[15px]"
+            disabled={loading}
+          >
+            {loading ? "Checking…" : "Log in"}
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 256 256"
+              fill="currentColor"
+            >
+              <path d="M221.66,133.66l-72,72a8,8,0,0,1-11.32-11.32L196.69,136H40a8,8,0,0,1,0-16H196.69L138.34,61.66a8,8,0,0,1,11.32-11.32l72,72A8,8,0,0,1,221.66,133.66Z" />
+            </svg>
+          </Button>
+        </form>
+
+        <p className="text-center text-[11px] text-neutral-600">
           Created by Christer John Parco
         </p>
       </div>

@@ -1,158 +1,136 @@
 @import "tailwindcss" source(none);
 @source "../src";
 @import "tw-animate-css";
-@import url("https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Condensed:wght@500;600;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
 
 @custom-variant dark (&:is(.dark *));
 
 /*
- * Design system definition — retuned to the "Industry" direction:
- * steel-blue accent, square corners (radius 0), Barlow Condensed headings
- * over Barlow body text.
+ * Design system definition — "Nocturne", associated to ServiceHub.
+ *
+ * This is Anthropic's Nocturne design system (see the project's own
+ * readme.md / styles.css) with one deliberate override: the accent is
+ * ServiceHub's own brand orange (#f39116, from servicehub-logo.png and
+ * the ServiceHub_Mobile_dc.html prototype) in place of Nocturne's default
+ * blurple. Every other token — ground, surface, text, neutral ramp,
+ * radius, type — is taken as specified. Ramp steps for the accent are
+ * generated with the exact color-mix formula the prototype used, so the
+ * ramp behaves the way the rest of the system expects.
+ *
+ * Nocturne is dark-only (no light variant is documented), so :root IS
+ * the dark palette — there's no separate .dark toggle in this app.
  *
  * The @theme inline block maps CSS custom properties to Tailwind utility
- * classes (e.g. --color-primary -> bg-primary, text-primary).
- *
- * The :root and .dark blocks define the actual color values using oklch.
- * All colors MUST use oklch format.
- *
- * To add a new semantic color:
- * 1. Add the variable to :root (light value) and .dark (dark value)
- * 2. Register it in @theme inline as --color-<name>: var(--<name>)
+ * classes (e.g. --color-primary -> bg-primary, text-primary). All ramp
+ * steps are also registered directly (bg-neutral-800, text-accent-300,
+ * etc.) so components can reach for a named step the way the design
+ * system itself does, not just the semantic roles.
  */
 
 @theme inline {
-  --font-sans: "Barlow", system-ui, sans-serif;
-  --font-heading: "Barlow Condensed", system-ui, sans-serif;
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
-  --radius-2xl: calc(var(--radius) + 8px);
-  --radius-3xl: calc(var(--radius) + 12px);
-  --radius-4xl: calc(var(--radius) + 16px);
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
-  --color-popover: var(--popover);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-muted: var(--muted);
+  --font-sans: "Inter", system-ui, sans-serif;
+  --font-heading: "Inter", system-ui, sans-serif;
+
+  /* Nocturne's named steps (sm 4 / md 8 / lg 14), extended for larger
+     surfaces our app needs (job cards, the login panel) that the base
+     system doesn't name a token for. */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-2xl: 24px;
+  --radius-3xl: 28px;
+  --radius-4xl: 32px;
+
+  --color-background: var(--color-bg);
+  --color-foreground: var(--color-text);
+  --color-card: var(--color-surface);
+  --color-card-foreground: var(--color-text);
+  --color-popover: var(--color-surface);
+  --color-popover-foreground: var(--color-text);
+  --color-primary: var(--brand-accent);
+  --color-primary-foreground: var(--color-bg);
+  --color-secondary: var(--color-neutral-800);
+  --color-secondary-foreground: var(--color-text);
+  --color-muted: var(--color-neutral-800);
   --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-destructive: var(--destructive);
-  --color-destructive-foreground: var(--destructive-foreground);
-  --color-border: var(--border);
-  --color-input: var(--input);
-  --color-ring: var(--ring);
-  --color-ring-offset-background: var(--background);
-  --color-chart-1: var(--chart-1);
-  --color-chart-2: var(--chart-2);
-  --color-chart-3: var(--chart-3);
-  --color-chart-4: var(--chart-4);
-  --color-chart-5: var(--chart-5);
-  --color-sidebar: var(--sidebar);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --color-sidebar-primary: var(--sidebar-primary);
-  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-  --color-sidebar-accent: var(--sidebar-accent);
-  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-  --color-sidebar-border: var(--sidebar-border);
-  --color-sidebar-ring: var(--sidebar-ring);
-  --color-hivis: var(--hivis);
-  --color-hivis-foreground: var(--hivis-foreground);
-  --color-success: var(--success);
-  --color-success-foreground: var(--success-foreground);
+  --color-accent: var(--color-accent-800);
+  --color-accent-foreground: var(--color-accent-100);
+  /* No red exists in this mono-accent system — alerts read as an accent
+     tint (a deep, body-copy-safe step), not a danger hue. */
+  --color-destructive: var(--color-accent-300);
+  --color-destructive-foreground: var(--color-bg);
+  --color-border: var(--color-divider);
+  --color-input: var(--color-divider);
+  --color-ring: var(--brand-accent);
+  --color-ring-offset-background: var(--color-bg);
+  --color-chart-1: var(--color-accent-300);
+  --color-chart-2: var(--color-accent-500);
+  --color-chart-3: var(--color-accent-700);
+  --color-chart-4: var(--color-neutral-400);
+  --color-chart-5: var(--color-neutral-600);
+  --color-sidebar: var(--color-surface);
+  --color-sidebar-foreground: var(--color-text);
+  --color-sidebar-primary: var(--brand-accent);
+  --color-sidebar-primary-foreground: var(--color-bg);
+  --color-sidebar-accent: var(--color-accent-800);
+  --color-sidebar-accent-foreground: var(--color-accent-100);
+  --color-sidebar-border: var(--color-divider);
+  --color-sidebar-ring: var(--brand-accent);
+
+  /* Elevation is an edge plus ambient darkness on this ground, not a soft
+     drop — overrides Tailwind's default shadow-sm/md/lg so every shadcn
+     primitive (Dialog, Select, Popover…) inherits it for free. */
+  --shadow-sm: 0 0 0 1px var(--color-neutral-800);
+  --shadow-md:
+    0 0 0 1px var(--color-neutral-700), 0 6px 18px rgba(0, 0, 0, 0.55);
+  --shadow-lg:
+    0 0 0 1px var(--color-neutral-500), 0 16px 40px rgba(0, 0, 0, 0.65);
+
+  /* Full ramps as first-class Tailwind colors: bg-neutral-800,
+     border-neutral-700, text-accent-300, etc. */
+  --color-neutral-100: #f3f5fe;
+  --color-neutral-200: #e4e7f5;
+  --color-neutral-300: #cfd3e5;
+  --color-neutral-400: #b2b6ca;
+  --color-neutral-500: #9397ab;
+  --color-neutral-600: #75798c;
+  --color-neutral-700: #595d6c;
+  --color-neutral-800: #3f424d;
+  --color-neutral-900: #292b31;
+
+  --color-accent-100: color-mix(in oklch, #f39116 12%, white);
+  --color-accent-200: color-mix(in oklch, #f39116 25%, white);
+  --color-accent-300: color-mix(in oklch, #f39116 45%, white);
+  --color-accent-400: color-mix(in oklch, #f39116 70%, white);
+  --color-accent-500: #f39116;
+  --color-accent-600: color-mix(in oklch, #f39116 82%, black);
+  --color-accent-700: color-mix(in oklch, #f39116 62%, black);
+  --color-accent-800: color-mix(in oklch, #f39116 42%, black);
+  --color-accent-900: color-mix(in oklch, #f39116 26%, black);
 }
 
 :root {
-  --radius: 0px;
-  --background: oklch(0.96 0.004 247.9);
-  --foreground: oklch(0.16 0.02 264.7);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.2 0.01 264.7);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.2 0.01 264.7);
-  --primary: oklch(0.46 0.13 250);
-  --primary-foreground: oklch(0.98 0.003 247.9);
-  --secondary: oklch(0.94 0.005 247.9);
-  --secondary-foreground: oklch(0.2 0.01 264.7);
-  --muted: oklch(0.94 0.005 247.9);
-  --muted-foreground: oklch(0.5 0.02 258);
-  --accent: oklch(0.9 0.02 246);
-  --accent-foreground: oklch(0.3 0.05 246);
-  --destructive: oklch(0.55 0.19 27.3);
-  --destructive-foreground: oklch(0.98 0.003 247.9);
-  --border: oklch(0.78 0.015 258);
-  --input: oklch(0.78 0.015 258);
-  --ring: oklch(0.46 0.13 250);
-  --chart-1: oklch(0.53 0.07 246);
-  --chart-2: oklch(0.6 0.09 246);
-  --chart-3: oklch(0.68 0.06 246);
-  --chart-4: oklch(0.45 0.06 246);
-  --chart-5: oklch(0.38 0.05 246);
-  --sidebar: oklch(0.98 0.003 247.9);
-  --sidebar-foreground: oklch(0.2 0.01 264.7);
-  --sidebar-primary: oklch(0.53 0.07 246);
-  --sidebar-primary-foreground: oklch(0.98 0.003 247.9);
-  --sidebar-accent: oklch(0.94 0.005 247.9);
-  --sidebar-accent-foreground: oklch(0.2 0.01 264.7);
-  --sidebar-border: oklch(0.85 0.01 258);
-  --sidebar-ring: oklch(0.46 0.13 250);
-  --hivis: oklch(0.85 0.17 92);
-  --hivis-foreground: oklch(0.2 0.04 92);
-  --success: oklch(0.6 0.15 150);
-  --success-foreground: oklch(0.98 0.01 150);
-}
+  --color-bg: #161826;
+  --color-surface: #232532;
+  --color-text: #e9e9ed;
+  --brand-accent: #f39116; /* ServiceHub's brand orange, overriding
+     Nocturne's default blurple — see servicehub-logo.png and
+     ServiceHub_Mobile_dc.html, which anchor this exact value. */
+  --color-divider: color-mix(in srgb, #e9e9ed 16%, transparent);
+  --muted-foreground: color-mix(in srgb, #e9e9ed 55%, transparent);
 
-.dark {
-  --background: oklch(0.17 0.02 250);
-  --foreground: oklch(0.96 0.01 247.9);
-  --card: oklch(0.22 0.025 250);
-  --card-foreground: oklch(0.96 0.01 247.9);
-  --popover: oklch(0.25 0.035 246);
-  --popover-foreground: oklch(0.96 0.01 247.9);
-  --primary: oklch(0.75 0.06 246);
-  --primary-foreground: oklch(0.2 0.03 246);
-  --secondary: oklch(0.3 0.035 246);
-  --secondary-foreground: oklch(0.96 0.01 247.9);
-  --muted: oklch(0.3 0.035 246);
-  --muted-foreground: oklch(0.72 0.02 250);
-  --accent: oklch(0.35 0.04 246);
-  --accent-foreground: oklch(0.96 0.01 247.9);
-  --destructive: oklch(0.7 0.19 22.2);
-  --destructive-foreground: oklch(0.96 0.01 247.9);
-  --border: oklch(1 0 0 / 12%);
-  --input: oklch(1 0 0 / 16%);
-  --ring: oklch(0.6 0.03 264.4);
-  --chart-1: oklch(0.6 0.08 246);
-  --chart-2: oklch(0.68 0.09 246);
-  --chart-3: oklch(0.76 0.06 246);
-  --chart-4: oklch(0.5 0.06 246);
-  --chart-5: oklch(0.42 0.05 246);
-  --sidebar: oklch(0.25 0.035 246);
-  --sidebar-foreground: oklch(0.96 0.01 247.9);
-  --sidebar-primary: oklch(0.6 0.08 246);
-  --sidebar-primary-foreground: oklch(0.2 0.03 246);
-  --sidebar-accent: oklch(0.3 0.035 246);
-  --sidebar-accent-foreground: oklch(0.96 0.01 247.9);
-  --sidebar-border: oklch(1 0 0 / 12%);
-  --sidebar-ring: oklch(0.6 0.03 264.4);
-  --hivis: oklch(0.86 0.18 92);
-  --hivis-foreground: oklch(0.18 0.04 92);
-  --success: oklch(0.72 0.17 152);
-  --success-foreground: oklch(0.16 0.03 152);
+  /* Deck/landing-scale saturated ground — unused by this app; kept for
+     parity with the source design system should a slide-style surface
+     be needed later. */
+  --color-section: #262a60;
+  --color-section-glow: #353b80;
+  --color-section-ghost: #4c5397;
 }
 
 @layer base {
   * {
     border-color: var(--color-border);
-    border-radius: 0 !important;
   }
 
   body {
@@ -168,48 +146,70 @@
   h5,
   h6 {
     font-family: var(--font-heading);
-    font-weight: 700;
-    letter-spacing: -0.01em;
+    /* Nocturne rule: hierarchy is size and space, never weight past 500. */
+    font-weight: 500;
+    letter-spacing: -0.015em;
+  }
+
+  :focus {
+    outline: none;
+  }
+  :focus-visible {
+    outline: 2px solid var(--brand-accent);
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--brand-accent) 30%, transparent);
   }
 }
 
 @layer components {
-  /* Small uppercase condensed label used for section + column headers.
-     Borrowed from equipment plates and job tickets. */
+  /* Small uppercase label used for section + column headers — Nocturne's
+     own h6 / field-label treatment (12px, 0.08em tracking, neutral-500,
+     regular weight — never bold). */
   .eyebrow {
     font-family: var(--font-heading);
-    font-weight: 600;
-    font-size: 0.6875rem;
-    letter-spacing: 0.14em;
+    font-weight: 500;
+    font-size: 0.75rem;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
-    line-height: 1;
+    line-height: 1.2;
+    color: var(--color-neutral-500);
   }
 
-  /* Status spine: the coloured edge that runs down every job card/row. */
+  /* Status spine: the coloured edge that runs down every job card/row.
+     A line, in the system's own terms — not a flood. */
   .spine {
-    box-shadow: inset 4px 0 0 0 var(--spine-color, var(--border));
+    box-shadow: inset 3px 0 0 0 var(--spine-color, var(--color-neutral-700));
   }
 
-  /* Slow breathing pulse for the single job currently in progress. */
+  /* Breathing dot for the one job currently in progress — Nocturne's own
+     sh-breathe timing from the ServiceHub prototype (opacity only). */
   .live-dot {
-    animation: live-pulse 2s ease-in-out infinite;
+    animation: live-pulse 1.6s ease-in-out infinite;
   }
-
   @keyframes live-pulse {
     0%,
     100% {
       opacity: 1;
-      transform: scale(1);
     }
     50% {
-      opacity: 0.45;
-      transform: scale(0.82);
+      opacity: 0.35;
     }
   }
-
   @media (prefers-reduced-motion: reduce) {
     .live-dot {
       animation: none;
     }
+  }
+
+  /* Soft radial bloom behind the login panel — accent as a glow, per the
+     system's own login treatment. */
+  .hero-glow {
+    background: radial-gradient(
+      circle at 50% 15%,
+      color-mix(in oklch, var(--brand-accent) 14%, var(--color-bg)) 0%,
+      var(--color-bg) 55%
+    );
   }
 }

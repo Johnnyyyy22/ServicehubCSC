@@ -10,6 +10,7 @@ import {
   stampTime,
   dayKey,
   CONFLICT,
+  ROW_NOT_FOUND,
   STATUS_OPTIONS,
   type DispatchJob,
   type StatusOption,
@@ -113,7 +114,7 @@ function linkifyPhones(text: string) {
         key={i}
         href={`tel:${part.dial}`}
         onClick={(e) => e.stopPropagation()}
-        className="font-semibold text-primary underline underline-offset-2"
+        className="font-medium text-accent-300 underline underline-offset-2"
       >
         {part.raw}
       </a>
@@ -328,12 +329,25 @@ function DispatchPage() {
           forced.current.add(row);
           setLoginTimes((t) => ({ ...t, [row]: stampTime(new Date(lock.ts)) }));
           setLoginAt((t) => ({ ...t, [row]: lock.ts }));
-          const result = await logJobTime(row, "login", undefined, true);
+          const result = await logJobTime(
+            row,
+            "login",
+            job?.account ?? lock.accountCode,
+            job?.model ?? "",
+            undefined,
+            true,
+          );
           if (result.result === CONFLICT) {
             clearLock(row);
             toast.warning("Another engineer is on this job — please refresh.", {
               className: "border-amber-500",
             });
+          } else if (result.result === ROW_NOT_FOUND) {
+            clearLock(row);
+            toast.warning(
+              "Couldn't recover this login — the schedule changed. Please refresh.",
+              { className: "border-amber-500" },
+            );
           } else {
             markLockSynced(row);
             logActivity(
@@ -382,27 +396,98 @@ function DispatchPage() {
   }, [now, engineer, locks, load]);
 
   /* ----------------------------- actions ----------------------------- */
+  /**
+   * Re-checks, right before a write, that a job for this engineer + account
+   * still exists SOMEWHERE in the sheet — not necessarily at this exact row
+   * position. The backend now self-heals position drift on its own (see
+   * locateRow_ in the Apps Script), so this check mirrors that: it's not
+   * "is the row still at rowId", it's "does this engineer still have this
+   * job at all". This is what actually caused Bautista's login time to
+   * land on Barasan's row — the sheet shifted under a cached position —
+   * and it's now handled on both ends.
+   *
+   * Fails OPEN on a network error (no verdict either way — the engineer
+   * still needs to work with poor signal, and the offline queue is the
+   * real safety net there). Fails CLOSED only when no matching row exists
+   * anywhere for this engineer + account.
+   */
+  async function verifyRowOwnership(job: DispatchJob): Promise<boolean> {
+    if (!engineer) return false;
+    if (offline) return true; // can't verify without signal; queue handles it
+    try {
+      const fresh = await fetchDispatchJobs();
+      const idKey = engineer.id.trim().toLowerCase();
+      const nameKey = engineer.name.trim().toLowerCase();
+      const accKey = job.account.trim().toLowerCase();
+      return fresh.some((row) => {
+        const isMine =
+          row.engineerId.trim().toLowerCase() === idKey ||
+          row.engineer.trim().toLowerCase() === nameKey;
+        return isMine && row.account.trim().toLowerCase() === accKey;
+      });
+    } catch {
+      return true;
+    }
+  }
+
   async function handleStatus(job: DispatchJob, status: StatusOption) {
     if (!engineer) return;
     setSaving(job.rowId);
     setError("");
+    if (!(await verifyRowOwnership(job))) {
+      setError(
+        `Couldn't confirm this row still belongs to ${job.account} — the schedule may have changed. Tap Refresh and try again.`,
+      );
+      setSaving(null);
+      return;
+    }
     // Update the dropdown instantly — don't wait for the sheet round-trip.
     setPicked((p) => ({ ...p, [job.rowId]: status }));
     try {
-      const result = await updateJobStatus(job.rowId, status);
+      const result = await updateJobStatus(
+        job.rowId,
+        status,
+        job.account,
+        job.model,
+      );
+      if (result.result === ROW_NOT_FOUND) {
+        setPicked((p) => {
+          const next = { ...p };
+          delete next[job.rowId];
+          return next;
+        });
+        setError(
+          `Couldn't confirm this row still belongs to ${job.account} — the schedule changed. Tap Refresh and try again.`,
+        );
+        return;
+      }
       logActivity(
         job.account,
         `status → ${status}${shouldNotifyStatus(status) ? "" : " (no email)"}`,
         result.notified || result.acked,
       );
     } catch (e) {
-      // Roll back the optimistic update if the write failed.
-      setPicked((p) => {
-        const next = { ...p };
-        delete next[job.rowId];
-        return next;
+      // Offline (or the request otherwise never reached the script) — queue
+      // it rather than rolling the pick back. The engineer chose this
+      // status; losing that choice on a dropped connection would be worse
+      // than a short sync delay.
+      enqueue({
+        row: job.rowId,
+        action: "status",
+        time: stampTime(new Date()),
+        status,
+        engineer,
+        notify: shouldNotifyStatus(status) ? 1 : 0,
+        account: job.account,
+        machine: job.model,
       });
-      setError(e instanceof Error ? e.message : "Update failed.");
+      setQueue(readQueue());
+      logActivity(job.account, `status → ${status} (queued)`, false);
+      setError(
+        e instanceof Error
+          ? `${e.message} — saved offline and will sync automatically.`
+          : "Saved offline — will sync automatically.",
+      );
     } finally {
       setSaving(null);
     }
@@ -414,6 +499,16 @@ function DispatchPage() {
     const status = picked[job.rowId];
     if (action === "logout" && !status) {
       setError("Select a status before logging out.");
+      return;
+    }
+
+    setSaving(job.rowId);
+    setError("");
+    if (!(await verifyRowOwnership(job))) {
+      setError(
+        `Couldn't confirm this row still belongs to ${job.account} — the schedule may have changed. Tap Refresh and try again.`,
+      );
+      setSaving(null);
       return;
     }
 
@@ -429,6 +524,7 @@ function DispatchPage() {
       engineer,
       notify: 1,
       account: job.account,
+      machine: job.model,
     } as Omit<QueueItem, "id" | "attempts" | "acked" | "nextAt">;
 
     // Write the lock BEFORE the fetch so a crash mid-request still resumes.
@@ -458,14 +554,14 @@ function DispatchPage() {
         }));
     }
 
-    setSaving(job.rowId);
-    setError("");
     inFlight.current.set(job.rowId + action, pending);
 
     try {
       const result = await logJobTime(
         job.rowId,
         action,
+        job.account,
+        job.model,
         action === "logout" ? status : undefined,
       );
       inFlight.current.delete(job.rowId + action);
@@ -488,6 +584,27 @@ function DispatchPage() {
         toast.warning("Another engineer is on this job — please refresh.", {
           className: "border-amber-500",
         });
+        logActivity(job.account, `${action} rejected`, false);
+        return;
+      }
+
+      if (result.result === ROW_NOT_FOUND) {
+        setLocks(clearLock(job.rowId));
+        setLoginTimes((t) => {
+          const next = { ...t };
+          delete next[job.rowId];
+          return next;
+        });
+        if (action === "logout") {
+          setLogoutTimes((t) => {
+            const next = { ...t };
+            delete next[job.rowId];
+            return next;
+          });
+        }
+        setError(
+          `Couldn't confirm this row still belongs to ${job.account} — the schedule changed. Tap Refresh and try again.`,
+        );
         logActivity(job.account, `${action} rejected`, false);
         return;
       }
@@ -542,9 +659,20 @@ function DispatchPage() {
   const completedCount = completedJobs.length;
 
   /**
-   * Every job is in exactly one of three states. Both the mobile cards and the
-   * desktop table read from this so the spine colour, label and dot never drift
+   * Every job is in exactly one of three states. Both the mobile cards and
+   * the desktop table read from this so the spine, chip and dot never drift
    * apart.
+   *
+   * Nocturne is mono-accent (one hue, no red/green/yellow roles), so state
+   * is encoded the way the ServiceHub_Mobile_dc.html prototype encodes its
+   * own status tags — by dot FORM and tonal depth, not by color:
+   *   not started → the neutral tag, no dot (their own "Log in first" tag
+   *                 carries no dot either)
+   *   in progress → filled accent dot, breathing (their "on site" indicator)
+   *   completed   → the same filled-accent family, static — a deeper ramp
+   *                 step than in-progress rather than a different hue,
+   *                 since "contrast comes from the tonal ramps, not
+   *                 saturation" is the system's own rule.
    */
   function jobState(rowId: string) {
     const loggedIn = Boolean(loginTimes[rowId]) || Boolean(locks[rowId]);
@@ -553,43 +681,43 @@ function DispatchPage() {
       return {
         key: "done" as const,
         label: "Completed",
-        spine: "var(--success)",
-        chip: "bg-success/15 text-success",
-        dot: "bg-success",
+        spine: "var(--color-accent-700)",
+        chip: "bg-accent-800 text-accent-100",
+        dot: "bg-accent-300",
       };
     if (loggedIn)
       return {
         key: "onsite" as const,
         label: "In progress",
-        spine: "var(--hivis)",
-        chip: "bg-hivis text-hivis-foreground",
-        dot: "bg-hivis-foreground live-dot",
+        spine: "var(--color-accent-500)",
+        chip: "bg-accent-800 text-accent-100",
+        dot: "live-dot bg-accent-300",
       };
     return {
       key: "waiting" as const,
       label: "Not started",
-      spine: "var(--border)",
-      chip: "bg-muted text-muted-foreground",
-      dot: "bg-muted-foreground",
+      spine: "var(--color-neutral-700)",
+      chip: "bg-neutral-800 text-neutral-300",
+      dot: null,
     };
   }
 
   return (
     <main className="min-h-screen bg-background px-4 py-10">
       <div className="mx-auto w-full max-w-6xl">
-        <header className="border-b-2 border-foreground pb-5">
+        <header className="pb-6">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="min-w-0">
-              <h1 className="text-4xl leading-none text-foreground sm:text-5xl">
+              <h1 className="text-3xl leading-none text-foreground sm:text-4xl">
                 Daily dispatch
               </h1>
-              <p className="mt-2 text-sm text-muted-foreground">
+              <p className="mt-2 text-sm text-neutral-400">
                 {engineer ? (
                   <>
-                    <span className="font-semibold text-foreground">
+                    <span className="font-medium text-foreground">
                       {engineer.name || "Engineer"}
                     </span>
-                    <span className="mx-1.5 text-border">/</span>
+                    <span className="mx-1.5 text-neutral-700">·</span>
                     <span className="tabular-nums">ID {engineer.id}</span>
                   </>
                 ) : (
@@ -598,38 +726,41 @@ function DispatchPage() {
               </p>
             </div>
 
-            <div className="flex flex-col items-start gap-3 sm:items-end">
-              <div className="flex flex-wrap items-center gap-2">
-                {offline && (
-                  <span className="eyebrow flex items-center gap-2 bg-hivis px-3 py-2 text-hivis-foreground">
-                    <span className="live-dot inline-block h-2 w-2 bg-hivis-foreground" />
-                    No connection
-                  </span>
-                )}
+            <div className="flex flex-col items-end gap-2">
+              <div className="flex items-center gap-2">
                 <Button
                   variant="outline"
                   onClick={() => engineer && load(engineer.id, engineer.name)}
                   disabled={loading}
+                  size="sm"
                 >
                   {loading ? "Refreshing…" : "Refresh"}
                 </Button>
                 <Button
-                  variant="outline"
+                  variant="ghost"
+                  size="icon"
                   onClick={signOut}
-                  className="border-destructive/50 bg-destructive/10 font-semibold text-destructive hover:bg-destructive/20 hover:text-destructive"
+                  aria-label="Sign out"
+                  className="h-9 w-9"
                 >
-                  Sign out
+                  <svg
+                    width="16"
+                    height="16"
+                    viewBox="0 0 256 256"
+                    fill="currentColor"
+                  >
+                    <path d="M124,216a12,12,0,0,1-12,12H48a20,20,0,0,1-20-20V48A20,20,0,0,1,48,28h64a12,12,0,0,1,0,24H52V212h60A12,12,0,0,1,124,216Zm113.66-96-40-40a12,12,0,0,0-17,17L204.7,116H112a12,12,0,0,0,0,24h92.7l-24.05,19.51a12,12,0,1,0,17,17l40-40A12,12,0,0,0,237.66,120Z" />
+                  </svg>
                 </Button>
               </div>
               {now && (
-                <p className="text-sm text-muted-foreground">
+                <p className="text-xs text-neutral-500">
                   {now.toLocaleDateString("en-US", {
-                    weekday: "long",
                     month: "long",
                     day: "numeric",
                   })}
-                  <span className="mx-1.5 text-border">/</span>
-                  <span className="font-semibold tabular-nums text-foreground">
+                  <span className="mx-1.5 text-neutral-700">·</span>
+                  <span className="tabular-nums">
                     {now
                       .toLocaleTimeString("en-US", {
                         hour: "numeric",
@@ -641,14 +772,24 @@ function DispatchPage() {
                   </span>
                 </p>
               )}
+              <button
+                type="button"
+                onClick={() => void drain()}
+                className="flex items-center gap-1.5 text-xs text-neutral-500 transition-colors hover:text-neutral-300"
+              >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${offline ? "bg-neutral-500" : "bg-accent-300"}`}
+                />
+                {offline ? "No connection — tap to retry" : "Connected"}
+              </button>
             </div>
           </div>
 
           {/* Duty bar — the day at a glance, before any scrolling. */}
-          <dl className="mt-5 grid grid-cols-2 border border-border bg-card">
-            <div className="px-4 py-3">
-              <dt className="eyebrow text-muted-foreground">Assigned</dt>
-              <dd className="mt-1.5 text-3xl leading-none font-bold tabular-nums text-foreground">
+          <dl className="mt-5 grid grid-cols-2 rounded-xl border border-neutral-700 bg-neutral-800">
+            <div className="px-4 py-3.5">
+              <dt className="eyebrow">Assigned</dt>
+              <dd className="mt-1.5 text-3xl leading-none font-medium tabular-nums text-foreground">
                 {jobs.length}
               </dd>
             </div>
@@ -656,15 +797,15 @@ function DispatchPage() {
               type="button"
               onClick={() => setCompletedOpen(true)}
               aria-haspopup="dialog"
-              className="border-l border-border px-4 py-3 text-left transition-colors hover:bg-muted/50"
+              className="rounded-r-xl border-l border-neutral-700 px-4 py-3.5 text-left transition-colors hover:bg-neutral-700/50"
             >
-              <dt className="eyebrow flex items-center gap-1 text-muted-foreground">
+              <dt className="eyebrow flex items-center gap-1">
                 Completed
-                <span aria-hidden="true" className="text-success">
+                <span aria-hidden="true" className="text-accent-300">
                   ›
                 </span>
               </dt>
-              <dd className="mt-1.5 text-3xl leading-none font-bold tabular-nums text-success">
+              <dd className="mt-1.5 text-3xl leading-none font-medium tabular-nums text-accent-300">
                 {completedCount}
               </dd>
             </button>
@@ -672,9 +813,9 @@ function DispatchPage() {
         </header>
 
         <Dialog open={completedOpen} onOpenChange={setCompletedOpen}>
-          <DialogContent className="max-h-[80vh] max-w-lg overflow-y-auto border-2 border-foreground">
+          <DialogContent className="max-h-[80vh] max-w-lg overflow-y-auto rounded-xl border-neutral-700 bg-card">
             <DialogHeader>
-              <DialogTitle className="font-heading text-2xl">
+              <DialogTitle className="text-xl font-medium">
                 Completed today
               </DialogTitle>
               <DialogDescription>
@@ -684,7 +825,7 @@ function DispatchPage() {
               </DialogDescription>
             </DialogHeader>
             {completedJobs.length === 0 ? (
-              <p className="border border-border bg-muted/40 px-4 py-8 text-center text-sm text-muted-foreground">
+              <p className="rounded-lg border border-neutral-700 bg-neutral-800 px-4 py-8 text-center text-sm text-neutral-500">
                 No completed jobs yet today.
               </p>
             ) : (
@@ -692,37 +833,35 @@ function DispatchPage() {
                 {completedJobs.map((job) => (
                   <li
                     key={job.rowId}
-                    className="spine border border-border bg-card px-4 py-3"
+                    className="spine rounded-xl border border-neutral-700 bg-neutral-800 px-4 py-3"
                     style={
                       {
-                        "--spine-color": "var(--success)",
+                        "--spine-color": "var(--color-accent-700)",
                       } as React.CSSProperties
                     }
                   >
-                    <p className="font-semibold text-foreground">
-                      {job.account}
-                    </p>
-                    <p className="text-xs text-muted-foreground">{job.model}</p>
+                    <p className="font-medium text-foreground">{job.account}</p>
+                    <p className="text-xs text-neutral-500">{job.model}</p>
                     <p className="mt-2 text-sm text-foreground">
                       {picked[job.rowId] ?? job.status ?? "—"}
                     </p>
-                    <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 border-t border-border pt-2 text-xs text-muted-foreground">
+                    <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 border-t border-neutral-700 pt-2 text-xs text-neutral-500">
                       <span>
                         In{" "}
-                        <span className="tabular-nums text-foreground">
+                        <span className="tabular-nums text-neutral-300">
                           {loginTimes[job.rowId] ?? "—"}
                         </span>
                       </span>
                       <span>
                         Out{" "}
-                        <span className="tabular-nums text-foreground">
+                        <span className="tabular-nums text-neutral-300">
                           {logoutTimes[job.rowId] ?? "—"}
                         </span>
                       </span>
                       {duration[job.rowId] && (
                         <span>
                           Duration{" "}
-                          <span className="font-semibold tabular-nums text-foreground">
+                          <span className="font-medium tabular-nums text-neutral-300">
                             {duration[job.rowId]}
                           </span>
                         </span>
@@ -743,7 +882,7 @@ function DispatchPage() {
         )}
 
         {stalled && (
-          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
             <span>
               Some events could not be sent after {MAX_ATTEMPTS} attempts.
             </span>
@@ -779,13 +918,13 @@ function DispatchPage() {
         )}
 
         {error && (
-          <p className="mt-6 border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          <p className="mt-6 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
             {error}
           </p>
         )}
 
         <section className="mt-6 border border-border bg-card p-4">
-          <h2 className="text-sm font-semibold text-foreground">
+          <h2 className="text-sm font-medium text-foreground">
             Recent activity
           </h2>
           {activity.length === 0 ? (
@@ -852,7 +991,7 @@ function DispatchPage() {
                 return (
                   <article
                     key={job.rowId}
-                    className="spine border border-border bg-card"
+                    className="spine overflow-hidden rounded-xl border border-neutral-700 bg-neutral-800"
                     style={
                       { "--spine-color": state.spine } as React.CSSProperties
                     }
@@ -867,7 +1006,7 @@ function DispatchPage() {
                           [job.rowId]: !e[job.rowId],
                         }))
                       }
-                      className="flex w-full items-start justify-between gap-3 border-b border-border px-4 py-3 pl-5 text-left transition-colors hover:bg-muted/50"
+                      className="flex w-full items-start justify-between gap-3 border-b border-neutral-700 px-4 py-3 pl-5 text-left transition-colors hover:bg-neutral-700/40"
                     >
                       <div className="min-w-0">
                         <h3 className="truncate text-lg leading-tight text-foreground">
@@ -879,11 +1018,13 @@ function DispatchPage() {
                       </div>
                       <span className="flex shrink-0 items-center gap-2">
                         <span
-                          className={`eyebrow flex items-center gap-1.5 px-2 py-1.5 ${state.chip}`}
+                          className={`eyebrow flex items-center gap-1.5 rounded-full px-2 py-1.5 ${state.chip}`}
                         >
-                          <span
-                            className={`inline-block h-1.5 w-1.5 ${state.dot}`}
-                          />
+                          {state.dot && (
+                            <span
+                              className={`inline-block h-1.5 w-1.5 rounded-full ${state.dot}`}
+                            />
+                          )}
                           {state.label}
                         </span>
                         <span
@@ -919,7 +1060,7 @@ function DispatchPage() {
                           </div>
                         )}
                         {(loggedIn || loggedOut) && (
-                          <div className="flex gap-6 border-t border-border pt-2.5">
+                          <div className="flex gap-6 border-t border-neutral-700 pt-2.5">
                             <div>
                               <dt className="eyebrow text-muted-foreground">
                                 In
@@ -941,7 +1082,7 @@ function DispatchPage() {
                                 <dt className="eyebrow text-muted-foreground">
                                   Duration
                                 </dt>
-                                <dd className="mt-1 font-semibold tabular-nums text-foreground">
+                                <dd className="mt-1 font-medium tabular-nums text-foreground">
                                   {duration[job.rowId]}
                                 </dd>
                               </div>
@@ -951,9 +1092,9 @@ function DispatchPage() {
                       </dl>
                     )}
 
-                    <div className="space-y-2 border-t border-border bg-muted/40 px-4 py-3 pl-5">
+                    <div className="space-y-2 border-t border-neutral-700 bg-neutral-900/40 px-4 py-3 pl-5">
                       {unconfirmed && (
-                        <p className="eyebrow bg-hivis px-2 py-1.5 text-hivis-foreground">
+                        <p className="eyebrow rounded-md bg-destructive/15 px-2 py-1.5 text-destructive">
                           Resume · unsynced
                         </p>
                       )}
@@ -996,7 +1137,7 @@ function DispatchPage() {
 
                       {!loggedIn && (
                         <Button
-                          className="h-12 w-full text-base font-semibold"
+                          className="h-12 w-full text-base font-medium"
                           disabled={
                             busy ||
                             (activeJob !== null && activeJob !== job.rowId)
@@ -1009,7 +1150,7 @@ function DispatchPage() {
                       {loggedIn && !loggedOut && (
                         <Button
                           variant="outline"
-                          className="h-12 w-full border-2 border-foreground text-base font-semibold"
+                          className="h-12 w-full text-base font-medium"
                           disabled={!picked[job.rowId] || busy}
                           onClick={() => handleLog(job, "logout")}
                         >
@@ -1032,189 +1173,195 @@ function DispatchPage() {
           </div>
 
           {/* ---------- Desktop: full table ---------- */}
-          <div className="mt-3 hidden overflow-x-auto border border-border bg-card md:block">
-            <table className="w-full min-w-[900px] text-left text-sm">
-              <thead className="border-b-2 border-foreground bg-muted/60">
-                <tr className="eyebrow text-muted-foreground">
-                  <th className="px-4 py-3 pl-5">Account</th>
-                  <th className="px-4 py-3">Machine model</th>
-                  <th className="px-4 py-3">Purpose</th>
-                  <th className="px-4 py-3">
-                    Remarks / Contact person / Contact no / Address
-                  </th>
-                  <th className="px-4 py-3">Status after service</th>
-                  <th className="px-4 py-3">Log in</th>
-                  <th className="px-4 py-3">Log out</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {loading && (
-                  <tr>
-                    <td
-                      colSpan={7}
-                      className="px-4 py-10 text-center text-muted-foreground"
-                    >
-                      Loading jobs…
-                    </td>
+          <div className="mt-3 hidden overflow-hidden rounded-xl border border-neutral-700 bg-neutral-800 md:block">
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[900px] text-left text-sm">
+                <thead className="border-b border-neutral-700 bg-neutral-900/40">
+                  <tr className="eyebrow">
+                    <th className="px-4 py-3 pl-5">Account</th>
+                    <th className="px-4 py-3">Machine model</th>
+                    <th className="px-4 py-3">Purpose</th>
+                    <th className="px-4 py-3">
+                      Remarks / Contact person / Contact no / Address
+                    </th>
+                    <th className="px-4 py-3">Status after service</th>
+                    <th className="px-4 py-3">Log in</th>
+                    <th className="px-4 py-3">Log out</th>
                   </tr>
-                )}
-                {!loading && jobs.length === 0 && (
-                  <tr>
-                    <td
-                      colSpan={7}
-                      className="px-4 py-10 text-center text-muted-foreground"
-                    >
-                      No jobs assigned today.
-                    </td>
-                  </tr>
-                )}
-                {!loading &&
-                  jobs.map((job) => {
-                    const lock = locks[job.rowId];
-                    const loggedIn =
-                      Boolean(loginTimes[job.rowId]) || Boolean(lock);
-                    const loggedOut = Boolean(logoutTimes[job.rowId]);
-                    const unconfirmed = Boolean(lock && !lock.syncedAt);
-                    const busy = saving === job.rowId;
-                    const state = jobState(job.rowId);
-                    return (
-                      <tr
-                        key={job.rowId}
-                        className="align-top transition-colors hover:bg-muted/40"
+                </thead>
+                <tbody className="divide-y divide-neutral-700">
+                  {loading && (
+                    <tr>
+                      <td
+                        colSpan={7}
+                        className="px-4 py-10 text-center text-muted-foreground"
                       >
-                        <td
-                          className="spine px-4 py-3 pl-5"
-                          style={
-                            {
-                              "--spine-color": state.spine,
-                            } as React.CSSProperties
-                          }
+                        Loading jobs…
+                      </td>
+                    </tr>
+                  )}
+                  {!loading && jobs.length === 0 && (
+                    <tr>
+                      <td
+                        colSpan={7}
+                        className="px-4 py-10 text-center text-muted-foreground"
+                      >
+                        No jobs assigned today.
+                      </td>
+                    </tr>
+                  )}
+                  {!loading &&
+                    jobs.map((job) => {
+                      const lock = locks[job.rowId];
+                      const loggedIn =
+                        Boolean(loginTimes[job.rowId]) || Boolean(lock);
+                      const loggedOut = Boolean(logoutTimes[job.rowId]);
+                      const unconfirmed = Boolean(lock && !lock.syncedAt);
+                      const busy = saving === job.rowId;
+                      const state = jobState(job.rowId);
+                      return (
+                        <tr
+                          key={job.rowId}
+                          className="align-top transition-colors hover:bg-muted/40"
                         >
-                          <span className="font-semibold text-foreground">
-                            {job.account}
-                          </span>
-                          <span
-                            className={`eyebrow mt-1.5 flex w-fit items-center gap-1.5 px-2 py-1 ${state.chip}`}
+                          <td
+                            className="spine px-4 py-3 pl-5"
+                            style={
+                              {
+                                "--spine-color": state.spine,
+                              } as React.CSSProperties
+                            }
                           >
+                            <span className="font-medium text-foreground">
+                              {job.account}
+                            </span>
                             <span
-                              className={`inline-block h-1.5 w-1.5 ${state.dot}`}
-                            />
-                            {state.label}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-muted-foreground">
-                          {job.model}
-                        </td>
-                        <td className="px-4 py-3 text-muted-foreground">
-                          {job.purpose}
-                        </td>
-                        <td className="max-w-sm px-4 py-3 whitespace-pre-wrap text-muted-foreground">
-                          {linkifyPhones(job.remarks)}
-                        </td>
-                        <td className="px-4 py-3">
-                          <Select
-                            value={
-                              picked[job.rowId] ??
-                              (STATUS_OPTIONS.includes(
-                                job.status as StatusOption,
-                              )
-                                ? job.status
-                                : "")
-                            }
-                            disabled={
-                              !loggedIn || unconfirmed || loggedOut || busy
-                            }
-                            onValueChange={(v) =>
-                              handleStatus(job, v as StatusOption)
-                            }
-                          >
-                            <SelectTrigger
-                              className="w-64"
-                              aria-label={`Status for ${job.account}`}
+                              className={`eyebrow mt-1.5 flex w-fit items-center gap-1.5 rounded-full px-2 py-1 ${state.chip}`}
                             >
-                              <SelectValue
-                                placeholder={
-                                  !loggedIn
-                                    ? "Log in first"
-                                    : unconfirmed
-                                      ? "Confirming…"
-                                      : busy
-                                        ? "Saving…"
-                                        : "Select status"
-                                }
-                              />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {STATUS_OPTIONS.map((s) => (
-                                <SelectItem key={s} value={s}>
-                                  {s}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                          <p className="mt-1 max-w-64 text-[11px] leading-snug text-muted-foreground">
-                            Engineers and the dispatcher email will be notified
-                            on completion.
-                          </p>
-                        </td>
-                        <td className="px-4 py-3">
-                          {loggedIn ? (
-                            <span className="flex flex-col gap-1">
-                              <span className="tabular-nums text-foreground">
-                                {loginTimes[job.rowId] ?? "—"}
-                              </span>
-                              {unconfirmed && (
-                                <span className="eyebrow w-fit bg-hivis px-2 py-1 text-hivis-foreground">
-                                  Resume · unsynced
-                                </span>
+                              {state.dot && (
+                                <span
+                                  className={`inline-block h-1.5 w-1.5 rounded-full ${state.dot}`}
+                                />
                               )}
+                              {state.label}
                             </span>
-                          ) : (
-                            <Button
-                              size="sm"
-                              disabled={
-                                busy ||
-                                (activeJob !== null && activeJob !== job.rowId)
+                          </td>
+                          <td className="px-4 py-3 text-muted-foreground">
+                            {job.model}
+                          </td>
+                          <td className="px-4 py-3 text-muted-foreground">
+                            {job.purpose}
+                          </td>
+                          <td className="max-w-sm px-4 py-3 whitespace-pre-wrap text-muted-foreground">
+                            {linkifyPhones(job.remarks)}
+                          </td>
+                          <td className="px-4 py-3">
+                            <Select
+                              value={
+                                picked[job.rowId] ??
+                                (STATUS_OPTIONS.includes(
+                                  job.status as StatusOption,
+                                )
+                                  ? job.status
+                                  : "")
                               }
-                              onClick={() => handleLog(job, "login")}
+                              disabled={
+                                !loggedIn || unconfirmed || loggedOut || busy
+                              }
+                              onValueChange={(v) =>
+                                handleStatus(job, v as StatusOption)
+                              }
                             >
-                              {busy ? "Saving…" : "Log in"}
-                            </Button>
-                          )}
-                        </td>
-                        <td className="px-4 py-3">
-                          {loggedOut ? (
-                            <span className="flex flex-col gap-1 text-xs">
-                              <span className="tabular-nums text-foreground">
-                                {logoutTimes[job.rowId]}
-                              </span>
-                              {duration[job.rowId] && (
-                                <span className="text-muted-foreground">
-                                  {duration[job.rowId]} total
+                              <SelectTrigger
+                                className="w-64"
+                                aria-label={`Status for ${job.account}`}
+                              >
+                                <SelectValue
+                                  placeholder={
+                                    !loggedIn
+                                      ? "Log in first"
+                                      : unconfirmed
+                                        ? "Confirming…"
+                                        : busy
+                                          ? "Saving…"
+                                          : "Select status"
+                                  }
+                                />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {STATUS_OPTIONS.map((s) => (
+                                  <SelectItem key={s} value={s}>
+                                    {s}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            <p className="mt-1 max-w-64 text-[11px] leading-snug text-muted-foreground">
+                              Engineers and the dispatcher email will be
+                              notified on completion.
+                            </p>
+                          </td>
+                          <td className="px-4 py-3">
+                            {loggedIn ? (
+                              <span className="flex flex-col gap-1">
+                                <span className="tabular-nums text-foreground">
+                                  {loginTimes[job.rowId] ?? "—"}
                                 </span>
-                              )}
-                            </span>
-                          ) : (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="border-2 border-foreground font-semibold"
-                              disabled={!loggedIn || !picked[job.rowId] || busy}
-                              onClick={() => handleLog(job, "logout")}
-                            >
-                              {busy
-                                ? "Saving…"
-                                : unconfirmed
-                                  ? "Resume / Log out"
-                                  : "Log out"}
-                            </Button>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-              </tbody>
-            </table>
+                                {unconfirmed && (
+                                  <span className="eyebrow w-fit rounded-md bg-destructive/15 px-2 py-1 text-destructive">
+                                    Resume · unsynced
+                                  </span>
+                                )}
+                              </span>
+                            ) : (
+                              <Button
+                                size="sm"
+                                disabled={
+                                  busy ||
+                                  (activeJob !== null &&
+                                    activeJob !== job.rowId)
+                                }
+                                onClick={() => handleLog(job, "login")}
+                              >
+                                {busy ? "Saving…" : "Log in"}
+                              </Button>
+                            )}
+                          </td>
+                          <td className="px-4 py-3">
+                            {loggedOut ? (
+                              <span className="flex flex-col gap-1 text-xs">
+                                <span className="tabular-nums text-foreground">
+                                  {logoutTimes[job.rowId]}
+                                </span>
+                                {duration[job.rowId] && (
+                                  <span className="text-muted-foreground">
+                                    {duration[job.rowId]} total
+                                  </span>
+                                )}
+                              </span>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={
+                                  !loggedIn || !picked[job.rowId] || busy
+                                }
+                                onClick={() => handleLog(job, "logout")}
+                              >
+                                {busy
+                                  ? "Saving…"
+                                  : unconfirmed
+                                    ? "Resume / Log out"
+                                    : "Log out"}
+                              </Button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
+            </div>
           </div>
         </section>
       </div>

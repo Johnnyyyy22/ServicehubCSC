@@ -1,7 +1,12 @@
-import { postToScript, type PostResult } from "./dispatch-api";
+import {
+  postToScript,
+  type PostResult,
+  type DispatchJob,
+} from "./dispatch-api";
 
 export const LOCK_KEY = "dispatch.lock";
 export const QUEUE_KEY = "dispatch.queue";
+export const JOBS_CACHE_KEY = "dispatch.jobsCache";
 
 export type LockEntry = {
   row: string;
@@ -31,6 +36,46 @@ function writeJson(key: string, value: unknown) {
     localStorage.setItem(key, JSON.stringify(value));
   } catch {
     /* quota or private mode — locks degrade to in-memory only */
+  }
+}
+
+/* --------------------------- jobs cache --------------------------- */
+/**
+ * The loaded dispatch list, persisted to localStorage — not just kept in
+ * React state. This is what actually makes "load your 3 jobs before you
+ * leave, work all day with zero signal" hold up: React state alone lives
+ * only in memory, and mobile browsers routinely kill or reload a
+ * backgrounded tab hours into a shift to save memory. Without this, an
+ * engineer who locks their phone at client 2 could come back to client 3
+ * with an empty dispatch list, no different from the load() bug that
+ * used to wipe it on a failed refresh.
+ *
+ * Scoped to a specific day + engineer so it can't leak into a new day's
+ * dispatch or another engineer sharing the device.
+ */
+export type JobsCacheEntry = {
+  day: string;
+  engineerId: string;
+  jobs: DispatchJob[];
+  loginTimes: Record<string, string>;
+  logoutTimes: Record<string, string>;
+  cachedAt: number;
+};
+
+export function readJobsCache(): JobsCacheEntry | null {
+  return readJson<JobsCacheEntry | null>(JOBS_CACHE_KEY, null);
+}
+
+export function writeJobsCache(entry: JobsCacheEntry) {
+  writeJson(JOBS_CACHE_KEY, entry);
+}
+
+export function clearJobsCache() {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.removeItem(JOBS_CACHE_KEY);
+  } catch {
+    /* ignore */
   }
 }
 

@@ -29,6 +29,9 @@ import {
   resetQueueBackoff,
   hasStalledItems,
   MAX_ATTEMPTS,
+  readJobsCache,
+  writeJobsCache,
+  clearJobsCache,
   type LockMap,
   type QueueItem,
 } from "@/lib/dispatch-store";
@@ -40,13 +43,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from "@/components/ui/dialog";
 
 export const Route = createFileRoute("/dispatch")({
   head: () => ({
@@ -151,14 +147,35 @@ function DispatchPage() {
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [offline, setOffline] = useState(false);
   const [activity, setActivity] = useState<ActivityEvent[]>([]);
-  const [completedOpen, setCompletedOpen] = useState(false);
   const inFlight = useRef<
     Map<string, Omit<QueueItem, "id" | "attempts" | "acked" | "nextAt">>
   >(new Map());
   const forced = useRef<Set<string>>(new Set());
+  // Prevents overlapping drain() runs — with several queued items each
+  // capped at a ~6-12s timeout, a slow-but-not-dead connection could
+  // otherwise let the 15s retry interval stack up concurrent attempts.
+  const draining = useRef(false);
   // Tracks the calendar day the screen is currently showing, so a midnight
   // rollover can be detected and the board reset for the new day's dispatch.
   const shownDay = useRef<string>(dayKey(new Date()));
+  // Login confirmation chime. Created lazily (only in the browser, only
+  // once) and replayed from the start on every tap rather than allocating
+  // a new Audio object each time.
+  const loginSound = useRef<HTMLAudioElement | null>(null);
+  function playLoginSound() {
+    if (typeof Audio === "undefined") return;
+    if (!loginSound.current) {
+      loginSound.current = new Audio("/login-success.mp3");
+    }
+    loginSound.current.currentTime = 0;
+    // Playback can still be blocked by browser policy in rare cases (e.g.
+    // a muted tab, or the very first interaction on some strict mobile
+    // browsers) — the login itself still succeeds either way, so this
+    // never surfaces to the engineer, just to the console for debugging.
+    void loginSound.current
+      .play()
+      .catch((err) => console.warn("Login sound blocked:", err));
+  }
 
   const lockedRow = Object.keys(locks)[0] ?? null;
   const activeJob =
@@ -202,6 +219,20 @@ function DispatchPage() {
     setLocks(readLocks());
     setQueue(readQueue());
     setOffline(typeof navigator !== "undefined" && !navigator.onLine);
+
+    // Show the last-known dispatch immediately — don't wait on the network.
+    // This is what keeps a reopened tab (killed by the OS, or just closed
+    // and reopened) from showing "no jobs assigned" while genuinely
+    // offline: the live load() below will refresh this if it can reach
+    // the sheet, but the engineer sees their jobs the instant the page
+    // renders either way.
+    const cached = readJobsCache();
+    const todayKey = dayKey(new Date());
+    if (cached && cached.day === todayKey && cached.engineerId === found.id) {
+      setJobs(cached.jobs);
+      setLoginTimes((t) => ({ ...cached.loginTimes, ...t }));
+      setLogoutTimes((t) => ({ ...cached.logoutTimes, ...t }));
+    }
   }, [navigate]);
 
   /* ---------------------- cross-tab lock sync ---------------------- */
@@ -209,17 +240,27 @@ function DispatchPage() {
 
   /* --------------------- online / offline / exit --------------------- */
   const drain = useCallback(async () => {
-    const remaining = await flushQueue((item, result) => {
-      logActivity(
-        item.account ?? "",
-        `${item.action} synced`,
-        result.notified || result.ok,
-      );
-      if (item.action === "logout") clearLock(item.row);
-      else markLockSynced(item.row);
-    });
-    setQueue(remaining);
-    setLocks(readLocks());
+    if (draining.current) return; // a run is already in progress — skip
+    draining.current = true;
+    try {
+      const remaining = await flushQueue((item, result) => {
+        // A successful send is proof we're actually online — more
+        // reliable than navigator.onLine, which can stay "true" the
+        // whole time on a radio-on-but-no-signal connection.
+        setOffline(false);
+        logActivity(
+          item.account ?? "",
+          `${item.action} synced`,
+          result.notified || result.ok,
+        );
+        if (item.action === "logout") clearLock(item.row);
+        else markLockSynced(item.row);
+      });
+      setQueue(remaining);
+      setLocks(readLocks());
+    } finally {
+      draining.current = false;
+    }
   }, [logActivity]);
 
   useEffect(() => {
@@ -290,10 +331,36 @@ function DispatchPage() {
       setLoginTimes((t) => ({ ...sheetIn, ...t }));
       setLogoutTimes((t) => ({ ...sheetOut, ...t }));
 
+      // Persist this to disk, not just React state — a live load is our
+      // best chance to refresh the offline copy an engineer will be
+      // working from all day, possibly across a killed/reloaded tab.
+      writeJobsCache({
+        day: todayKey,
+        engineerId: id,
+        jobs: mine,
+        loginTimes: sheetIn,
+        logoutTimes: sheetOut,
+        cachedAt: Date.now(),
+      });
+
       return mine;
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load jobs.");
-      setJobs([]);
+      // Do NOT clear jobs here — an engineer who already loaded today's
+      // dispatch (or has a cached copy from before losing signal) must
+      // keep seeing it. Wiping the list on a failed refresh was the exact
+      // bug that made "no jobs assigned today" appear while fully offline.
+      setJobs((prev) => {
+        if (prev.length > 0) return prev; // already showing something — keep it
+        const cached = readJobsCache();
+        const todayKey = dayKey(new Date());
+        if (cached && cached.day === todayKey && cached.engineerId === id) {
+          setLoginTimes((t) => ({ ...cached.loginTimes, ...t }));
+          setLogoutTimes((t) => ({ ...cached.logoutTimes, ...t }));
+          return cached.jobs;
+        }
+        return prev;
+      });
       return [];
     } finally {
       setLoading(false);
@@ -391,7 +458,6 @@ function DispatchPage() {
     setDuration({});
     setPicked({});
     setExpanded({});
-    setCompletedOpen(false);
     void load(engineer.id, engineer.name);
   }, [now, engineer, locks, load]);
 
@@ -426,6 +492,10 @@ function DispatchPage() {
         return isMine && row.account.trim().toLowerCase() === accKey;
       });
     } catch {
+      // A real failure here is the earliest possible signal that we're
+      // offline — flip the flag now so the write attempt just below (in
+      // the same tap) and every tap after it skip straight to the queue.
+      setOffline(true);
       return true;
     }
   }
@@ -443,6 +513,30 @@ function DispatchPage() {
     }
     // Update the dropdown instantly — don't wait for the sheet round-trip.
     setPicked((p) => ({ ...p, [job.rowId]: status }));
+
+    const queueStatus = () => {
+      enqueue({
+        row: job.rowId,
+        action: "status",
+        time: stampTime(new Date()),
+        status,
+        engineer,
+        notify: shouldNotifyStatus(status) ? 1 : 0,
+        account: job.account,
+        machine: job.model,
+      });
+      setQueue(readQueue());
+      logActivity(job.account, `status → ${status} (queued)`, false);
+    };
+
+    // Already known offline — don't wait through another doomed attempt.
+    if (offline) {
+      queueStatus();
+      setError("Saved offline — will sync automatically.");
+      setSaving(null);
+      return;
+    }
+
     try {
       const result = await updateJobStatus(
         job.rowId,
@@ -467,22 +561,10 @@ function DispatchPage() {
         result.notified || result.acked,
       );
     } catch (e) {
-      // Offline (or the request otherwise never reached the script) — queue
-      // it rather than rolling the pick back. The engineer chose this
-      // status; losing that choice on a dropped connection would be worse
-      // than a short sync delay.
-      enqueue({
-        row: job.rowId,
-        action: "status",
-        time: stampTime(new Date()),
-        status,
-        engineer,
-        notify: shouldNotifyStatus(status) ? 1 : 0,
-        account: job.account,
-        machine: job.model,
-      });
-      setQueue(readQueue());
-      logActivity(job.account, `status → ${status} (queued)`, false);
+      // A real failure just told us we're offline — trust that over
+      // navigator.onLine for the next tap.
+      setOffline(true);
+      queueStatus();
       setError(
         e instanceof Error
           ? `${e.message} — saved offline and will sync automatically.`
@@ -501,6 +583,14 @@ function DispatchPage() {
       setError("Select a status before logging out.");
       return;
     }
+
+    // Must fire HERE, synchronously, before any await. Browsers require
+    // HTMLMediaElement.play() to happen within the same synchronous tick
+    // as the user gesture (the tap) — once we've awaited anything (like
+    // the ownership check below), the browser silently rejects play()
+    // with no visible error, which is exactly why this went unheard
+    // before: it was being called after that await.
+    if (action === "login") playLoginSound();
 
     setSaving(job.rowId);
     setError("");
@@ -555,6 +645,20 @@ function DispatchPage() {
     }
 
     inFlight.current.set(job.rowId + action, pending);
+
+    // Already known offline (from a real failure, not just navigator.onLine
+    // — see the catch block below) — don't waste another ~12s finding that
+    // out again. Queue immediately; the 15s background retry and the
+    // browser's "online" event both pick this up once signal returns.
+    if (offline) {
+      inFlight.current.delete(job.rowId + action);
+      enqueue(pending);
+      setQueue(readQueue());
+      logActivity(job.account, `${action} queued`, false);
+      setError("Saved offline — will sync automatically.");
+      setSaving(null);
+      return;
+    }
 
     try {
       const result = await logJobTime(
@@ -623,14 +727,16 @@ function DispatchPage() {
       logActivity(job.account, action, result.notified || result.acked);
     } catch (e) {
       inFlight.current.delete(job.rowId + action);
-      // Roll back optimistic logout time if write failed.
-      if (action === "logout") {
-        setLogoutTimes((t) => {
-          const next = { ...t };
-          delete next[job.rowId];
-          return next;
-        });
-      }
+      // A real failure just told us we're offline — trust that over
+      // navigator.onLine, which can report "online" on a dead-but-radio-on
+      // connection. This makes the NEXT tap skip straight to the queue
+      // instead of independently rediscovering the same timeout.
+      setOffline(true);
+      // NOTE: the optimistic login/logout time set above is kept, not
+      // rolled back — it's safely captured in `pending` with the original
+      // timestamp and will sync once connectivity returns. Rolling it back
+      // here would make a successfully-queued tap look like it silently
+      // failed.
       enqueue(pending);
       setQueue(readQueue());
       logActivity(job.account, `${action} queued`, false);
@@ -648,15 +754,14 @@ function DispatchPage() {
     localStorage.removeItem("EngineerID");
     localStorage.removeItem("EngineerName");
     localStorage.removeItem("engineerEmail");
+    clearJobsCache();
     navigate({ to: "/" });
   }
 
   const pendingCount = queue.filter((q) => q.attempts < MAX_ATTEMPTS).length;
-  // "Completed" = logged out, regardless of which status was picked — Running
-  // Good, Backlog, whatever. The status dropdown is required before log-out,
-  // so a logged-out job always has one.
-  const completedJobs = jobs.filter((j) => Boolean(logoutTimes[j.rowId]));
-  const completedCount = completedJobs.length;
+  // "Remaining" = assigned jobs still waiting on a log-out — total assigned
+  // minus whatever's already been logged out today, regardless of status.
+  const remainingCount = jobs.filter((j) => !logoutTimes[j.rowId]).length;
 
   /**
    * Every job is in exactly one of three states. Both the mobile cards and
@@ -786,93 +891,15 @@ function DispatchPage() {
           </div>
 
           {/* Duty bar — the day at a glance, before any scrolling. */}
-          <dl className="mt-5 grid grid-cols-2 rounded-xl border border-neutral-700 bg-neutral-800">
+          <dl className="mt-5 rounded-xl border border-neutral-700 bg-neutral-800">
             <div className="px-4 py-3.5">
-              <dt className="eyebrow">Assigned</dt>
+              <dt className="eyebrow">Mga natitirang trabaho mo, pogi :</dt>
               <dd className="mt-1.5 text-3xl leading-none font-medium tabular-nums text-foreground">
-                {jobs.length}
+                {remainingCount}
               </dd>
             </div>
-            <button
-              type="button"
-              onClick={() => setCompletedOpen(true)}
-              aria-haspopup="dialog"
-              className="rounded-r-xl border-l border-neutral-700 px-4 py-3.5 text-left transition-colors hover:bg-neutral-700/50"
-            >
-              <dt className="eyebrow flex items-center gap-1">
-                Completed
-                <span aria-hidden="true" className="text-accent-300">
-                  ›
-                </span>
-              </dt>
-              <dd className="mt-1.5 text-3xl leading-none font-medium tabular-nums text-accent-300">
-                {completedCount}
-              </dd>
-            </button>
           </dl>
         </header>
-
-        <Dialog open={completedOpen} onOpenChange={setCompletedOpen}>
-          <DialogContent className="max-h-[80vh] max-w-lg overflow-y-auto rounded-xl border-neutral-700 bg-card">
-            <DialogHeader>
-              <DialogTitle className="text-xl font-medium">
-                Completed today
-              </DialogTitle>
-              <DialogDescription>
-                Every job you've logged out of today, with its status and time
-                on site. This clears automatically at midnight — the sheet keeps
-                the permanent record.
-              </DialogDescription>
-            </DialogHeader>
-            {completedJobs.length === 0 ? (
-              <p className="rounded-lg border border-neutral-700 bg-neutral-800 px-4 py-8 text-center text-sm text-neutral-500">
-                No completed jobs yet today.
-              </p>
-            ) : (
-              <ul className="space-y-3">
-                {completedJobs.map((job) => (
-                  <li
-                    key={job.rowId}
-                    className="spine rounded-xl border border-neutral-700 bg-neutral-800 px-4 py-3"
-                    style={
-                      {
-                        "--spine-color": "var(--color-accent-700)",
-                      } as React.CSSProperties
-                    }
-                  >
-                    <p className="font-medium text-foreground">{job.account}</p>
-                    <p className="text-xs text-neutral-500">{job.model}</p>
-                    <p className="mt-2 text-sm text-foreground">
-                      {picked[job.rowId] ?? job.status ?? "—"}
-                    </p>
-                    <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 border-t border-neutral-700 pt-2 text-xs text-neutral-500">
-                      <span>
-                        In{" "}
-                        <span className="tabular-nums text-neutral-300">
-                          {loginTimes[job.rowId] ?? "—"}
-                        </span>
-                      </span>
-                      <span>
-                        Out{" "}
-                        <span className="tabular-nums text-neutral-300">
-                          {logoutTimes[job.rowId] ?? "—"}
-                        </span>
-                      </span>
-                      {duration[job.rowId] && (
-                        <span>
-                          Duration{" "}
-                          <span className="font-medium tabular-nums text-neutral-300">
-                            {duration[job.rowId]}
-                          </span>
-                        </span>
-                      )}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </DialogContent>
-        </Dialog>
 
         {pendingCount > 0 && !stalled && (
           <p className="mt-4 border border-accent bg-accent/20 px-4 py-3 text-sm text-accent-foreground">

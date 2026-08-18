@@ -72,6 +72,29 @@ function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * fetch() with a hard timeout via AbortController. Plain fetch() has no
+ * built-in timeout — on a weak-but-not-fully-dead signal (the realistic
+ * "no internet" case in the field: radio on, no real connectivity) it can
+ * hang for a long time before the browser gives up on its own, well past
+ * what an engineer standing at a client site will wait for. Aborting after
+ * a few seconds means a dead connection fails FAST and falls through to
+ * the offline queue immediately, instead of leaving the UI looking frozen.
+ */
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  ms = 6000,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Races a promise against a timeout, throwing if the timeout wins. Used so
  * a dead connection doesn't leave the login screen hanging through
  * fetchLoginRows' full internal retry sequence before falling back to an
@@ -94,7 +117,7 @@ export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 
 async function getRows(params: Record<string, string> = {}): Promise<Row[]> {
   const qs = new URLSearchParams({ ...params, t: String(Date.now()) });
-  const res = await fetch(`${SHEET_URL}?${qs}`);
+  const res = await fetchWithTimeout(`${SHEET_URL}?${qs}`);
   if (!res.ok) throw new Error(`Request failed (${res.status})`);
   const text = await res.text();
   let parsed: unknown;
@@ -308,7 +331,7 @@ export async function postToScript(
   body.set("engineerEmail", identity.email);
 
   try {
-    const res = await fetch(API, {
+    const res = await fetchWithTimeout(API, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
@@ -332,13 +355,22 @@ export async function postToScript(
       acked: true,
     };
   } catch {
-    // Opaque fallback: the write still lands, we just cannot read the echo.
-    await fetch(API, {
-      method: "POST",
-      mode: "no-cors",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body,
-    });
+    // Opaque fallback: on some networks the main request fails (CORS,
+    // preflight quirks) even though the script would have received it.
+    // Try once more, no-cors, but with the SAME timeout guard — if the
+    // connection is actually dead, this must not hang either. Any
+    // failure here (including a timeout) propagates up so the caller
+    // queues the write for later instead of waiting forever.
+    await fetchWithTimeout(
+      API,
+      {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body,
+      },
+      6000,
+    );
     return { ok: true, result: "sent", notified: false, acked: false };
   }
 }

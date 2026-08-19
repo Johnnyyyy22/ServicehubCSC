@@ -1,6 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
+import { createPrimeableSound } from "@/lib/sound";
 import { fetchLoginRows, withTimeout } from "@/lib/dispatch-api";
 import {
   cacheOfflineCredential,
@@ -38,11 +39,16 @@ function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  // Played once sign-in actually succeeds. Primed synchronously below,
+  // before any await, so the browser's user-gesture requirement for
+  // audio playback is satisfied — see src/lib/sound.ts for why.
+  const loginChime = useRef(createPrimeableSound("/login-success.mp3")).current;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
     setLoading(true);
+    loginChime.prime();
     const u = username.trim();
     const p = password.trim();
 
@@ -90,6 +96,7 @@ function LoginPage() {
           engineerName,
           engineerEmail,
         );
+        loginChime.play();
         navigate({ to: "/dispatch" });
         return;
       } catch {
@@ -105,6 +112,7 @@ function LoginPage() {
       localStorage.setItem("EngineerID", cached.engineerId);
       localStorage.setItem("EngineerName", cached.engineerName);
       localStorage.setItem("engineerEmail", cached.engineerEmail);
+      loginChime.play();
       toast.info("Signed in offline — this will sync once you're back online.");
       navigate({ to: "/dispatch" });
       setLoading(false);

@@ -1,6 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { createPrimeableSound } from "@/lib/sound";
 import {
   fetchDispatchJobs,
   updateJobStatus,
@@ -158,24 +159,10 @@ function DispatchPage() {
   // Tracks the calendar day the screen is currently showing, so a midnight
   // rollover can be detected and the board reset for the new day's dispatch.
   const shownDay = useRef<string>(dayKey(new Date()));
-  // Login confirmation chime. Created lazily (only in the browser, only
-  // once) and replayed from the start on every tap rather than allocating
-  // a new Audio object each time.
-  const loginSound = useRef<HTMLAudioElement | null>(null);
-  function playLoginSound() {
-    if (typeof Audio === "undefined") return;
-    if (!loginSound.current) {
-      loginSound.current = new Audio("/login-success.mp3");
-    }
-    loginSound.current.currentTime = 0;
-    // Playback can still be blocked by browser policy in rare cases (e.g.
-    // a muted tab, or the very first interaction on some strict mobile
-    // browsers) — the login itself still succeeds either way, so this
-    // never surfaces to the engineer, just to the console for debugging.
-    void loginSound.current
-      .play()
-      .catch((err) => console.warn("Login sound blocked:", err));
-  }
+  // Job login confirmation chime. Primed synchronously on tap (satisfies
+  // the browser's gesture requirement), played for real once the ownership
+  // check confirms this login is actually being accepted.
+  const loginChime = useRef(createPrimeableSound("/login-success.mp3")).current;
 
   const lockedRow = Object.keys(locks)[0] ?? null;
   const activeJob =
@@ -584,13 +571,11 @@ function DispatchPage() {
       return;
     }
 
-    // Must fire HERE, synchronously, before any await. Browsers require
-    // HTMLMediaElement.play() to happen within the same synchronous tick
-    // as the user gesture (the tap) — once we've awaited anything (like
-    // the ownership check below), the browser silently rejects play()
-    // with no visible error, which is exactly why this went unheard
-    // before: it was being called after that await.
-    if (action === "login") playLoginSound();
+    // Prime here, synchronously, before any await — this is what actually
+    // satisfies the browser's gesture requirement. The real, audible
+    // play() happens below, only once the ownership check has confirmed
+    // this login is being accepted.
+    if (action === "login") loginChime.prime();
 
     setSaving(job.rowId);
     setError("");
@@ -631,6 +616,7 @@ function DispatchPage() {
       );
       setLoginTimes((t) => ({ ...t, [job.rowId]: stamp }));
       setLoginAt((t) => ({ ...t, [job.rowId]: at.getTime() }));
+      loginChime.play();
     }
 
     // Show logout time instantly — don't wait for the sheet round-trip.

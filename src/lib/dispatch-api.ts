@@ -407,23 +407,8 @@ export async function logJobTime(
   machine: string,
   status?: string,
   force?: boolean,
-  // Set true ONLY when `time`/`at` reflects something that genuinely
-  // happened earlier while the device was offline (a queued/replayed
-  // item) — see dispatch-store.ts's sendQueueItem and dispatch.tsx's
-  // login-replay. The backend trusts the device clock ONLY when this is
-  // set, and clamps it to a plausible window even then. A live,
-  // connected-right-now tap (offlineCapture left false) always gets
-  // timestamped by the server's own clock — the phone's clock is never
-  // consulted for that case, which is what stops "change my phone's
-  // time, then tap Log Out" from working while the device is actually
-  // online.
-  offlineCapture?: boolean,
-  // Optional explicit timestamp to send instead of "now" — used for the
-  // login-replay path, where the real moment of login is the local lock's
-  // original ts, not whenever the replay happens to run.
-  at?: Date,
 ) {
-  const now = at ?? new Date();
+  const now = new Date();
   return postToScript({
     row: rowId,
     action,
@@ -433,7 +418,6 @@ export async function logJobTime(
     ...(action === "logout" ? { date: now.toLocaleDateString("en-US") } : {}),
     ...(status ? { status } : {}),
     ...(force ? { force: 1 } : {}),
-    ...(offlineCapture ? { offlineCapture: 1 } : {}),
     notify: 1,
   });
 }

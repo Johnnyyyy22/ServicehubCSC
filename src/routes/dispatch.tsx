@@ -399,8 +399,6 @@ function DispatchPage() {
             job?.model ?? "",
             undefined,
             true,
-            true, // offlineCapture — lock.ts is a real earlier moment
-            new Date(lock.ts),
           );
           if (result.result === CONFLICT) {
             clearLock(row);

@@ -264,10 +264,6 @@ export async function sendQueueItem(
       ...(item.status ? { status: item.status } : {}),
       ...(item.date ? { date: item.date } : {}),
       ...(item.force ? { force: item.force } : {}),
-      // Everything reaching this function was captured earlier, offline,
-      // and is only syncing now — tell the backend to trust item.time
-      // (within its own sanity clamp) instead of stamping "now".
-      offlineCapture: 1,
       notify: item.notify,
     });
     return result;

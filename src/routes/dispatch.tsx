@@ -13,6 +13,7 @@ import {
   CONFLICT,
   ROW_NOT_FOUND,
   STATUS_OPTIONS,
+  getServerTimeOffset,
   type DispatchJob,
   type StatusOption,
   type Engineer,
@@ -189,9 +190,32 @@ function DispatchPage() {
   );
 
   /* ---------------------------- clock ---------------------------- */
+  // clockOffsetMs = serverTime - deviceTime. Added to every displayed
+  // "now" so the on-screen clock reflects Google's server clock, not
+  // whatever the phone's clock is set to. Re-synced on mount, whenever
+  // connectivity returns, and every 10 minutes in between — frequent
+  // enough that manually nudging the phone's clock mid-session can't
+  // keep the display wrong for long, without hammering the script.
+  const clockOffsetRef = useRef(0);
   useEffect(() => {
-    setNow(new Date());
-    const t = setInterval(() => setNow(new Date()), 1000);
+    let cancelled = false;
+    async function sync() {
+      const offset = await getServerTimeOffset();
+      if (!cancelled && offset !== null) clockOffsetRef.current = offset;
+    }
+    void sync();
+    const resync = setInterval(sync, 10 * 60 * 1000);
+    window.addEventListener("online", sync);
+    return () => {
+      cancelled = true;
+      clearInterval(resync);
+      window.removeEventListener("online", sync);
+    };
+  }, []);
+  useEffect(() => {
+    const tick = () => setNow(new Date(Date.now() + clockOffsetRef.current));
+    tick();
+    const t = setInterval(tick, 1000);
     return () => clearInterval(t);
   }, []);
 

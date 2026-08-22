@@ -148,6 +148,34 @@ async function warmUpScript(): Promise<void> {
   }
 }
 
+/**
+ * Fetches Google's server clock and returns the offset (ms) to add to
+ * `Date.now()` so the app's displayed "now" reflects real time even if
+ * the phone's own clock has been changed. Returns null on failure (the
+ * caller should just keep using whatever offset it already had, or 0).
+ *
+ * Deliberately cheap: reuses the same ?ping=1 endpoint already used to
+ * keep the script warm, just reads the serverTime field it returns.
+ * Round-trip latency is not compensated for — for a clock display this
+ * granularity is unnecessary, and the periodic re-sync (see dispatch.tsx)
+ * keeps any small error from accumulating.
+ */
+export async function getServerTimeOffset(): Promise<number | null> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    const res = await fetch(`${SHEET_URL}?ping=1&t=${String(Date.now())}`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    const data = (await res.json()) as { serverTime?: number };
+    if (typeof data.serverTime !== "number" || !data.serverTime) return null;
+    return data.serverTime - Date.now();
+  } catch {
+    return null;
+  }
+}
+
 /** Users tab: [EngineerID, EngineerName, Username, Password]
  *
  * Strategy:

@@ -333,6 +333,15 @@ function DispatchPage() {
       return mine;
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load jobs.");
+      // A failed load is a real, direct signal that the connection is
+      // dead — trust it over navigator.onLine (which can lie and still
+      // say "online" on a radio-on-but-no-signal connection). Setting
+      // this here, not just inside the action handlers, is what makes
+      // the VERY FIRST tap after a failed refresh go straight to the
+      // offline queue instead of wasting ~12s discovering the same
+      // thing twice (once in verifyRowOwnership, once in the actual
+      // post) before the button responds.
+      setOffline(true);
       // Do NOT clear jobs here — an engineer who already loaded today's
       // dispatch (or has a cached copy from before losing signal) must
       // keep seeing it. Wiping the list on a failed refresh was the exact
@@ -996,6 +1005,15 @@ function DispatchPage() {
                   Boolean(loginTimes[job.rowId]) || Boolean(lock);
                 const loggedOut = Boolean(logoutTimes[job.rowId]);
                 const unconfirmed = Boolean(lock && !lock.syncedAt);
+                // "unconfirmed" means the login write hasn't been ack'd by the
+                // sheet yet. That's meant as a brief safety pause while ONLINE
+                // (a few seconds, waiting on the round-trip) — it must NOT
+                // block the engineer while OFFLINE, or a login made with no
+                // signal can never be followed by a status pick or a logout,
+                // which defeats the entire point of the offline queue. Only
+                // gate the UI on "unconfirmed" when we're actually online and
+                // genuinely still waiting to hear back.
+                const blockedByUnconfirmed = unconfirmed && !offline;
                 const busy = saving === job.rowId;
                 const state = jobState(job.rowId);
                 // The job you're currently working opens by default; the rest
@@ -1118,7 +1136,9 @@ function DispatchPage() {
                             ? job.status
                             : "")
                         }
-                        disabled={!loggedIn || unconfirmed || loggedOut || busy}
+                        disabled={
+                          !loggedIn || blockedByUnconfirmed || loggedOut || busy
+                        }
                         onValueChange={(v) =>
                           handleStatus(job, v as StatusOption)
                         }
@@ -1131,7 +1151,7 @@ function DispatchPage() {
                             placeholder={
                               !loggedIn
                                 ? "Log in first"
-                                : unconfirmed
+                                : blockedByUnconfirmed
                                   ? "Confirming…"
                                   : busy
                                     ? "Saving…"
@@ -1230,6 +1250,9 @@ function DispatchPage() {
                         Boolean(loginTimes[job.rowId]) || Boolean(lock);
                       const loggedOut = Boolean(logoutTimes[job.rowId]);
                       const unconfirmed = Boolean(lock && !lock.syncedAt);
+                      // See the mobile card above for why this must not
+                      // gate the UI while genuinely offline.
+                      const blockedByUnconfirmed = unconfirmed && !offline;
                       const busy = saving === job.rowId;
                       const state = jobState(job.rowId);
                       return (
@@ -1279,7 +1302,10 @@ function DispatchPage() {
                                   : "")
                               }
                               disabled={
-                                !loggedIn || unconfirmed || loggedOut || busy
+                                !loggedIn ||
+                                blockedByUnconfirmed ||
+                                loggedOut ||
+                                busy
                               }
                               onValueChange={(v) =>
                                 handleStatus(job, v as StatusOption)
@@ -1293,7 +1319,7 @@ function DispatchPage() {
                                   placeholder={
                                     !loggedIn
                                       ? "Log in first"
-                                      : unconfirmed
+                                      : blockedByUnconfirmed
                                         ? "Confirming…"
                                         : busy
                                           ? "Saving…"

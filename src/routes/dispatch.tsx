@@ -604,6 +604,7 @@ function DispatchPage() {
       row: job.rowId,
       action,
       time: stamp,
+      atMs: at.getTime(),
       ...(action === "logout"
         ? { status, date: at.toLocaleDateString("en-US") }
         : {}),

@@ -193,6 +193,12 @@ export type QueueItem = {
   row: string;
   action: "login" | "logout" | "status";
   time: string;
+  // Authoritative epoch-ms capture, alongside `time` (kept for display/logs
+  // only). Sending a plain number avoids any locale/format ambiguity in
+  // how the backend parses a string like "12:00:00 PM" — no regex, no
+  // AM/PM edge cases, no risk of a device-specific formatting quirk
+  // silently failing to parse and falling back to the wrong time.
+  atMs: number;
   status?: string;
   engineer: { id: string; name: string; email: string };
   attempts: number;
@@ -261,6 +267,7 @@ export async function sendQueueItem(
       account: item.account,
       machine: item.machine,
       time: item.time,
+      atMs: item.atMs,
       ...(item.status ? { status: item.status } : {}),
       ...(item.date ? { date: item.date } : {}),
       ...(item.force ? { force: item.force } : {}),

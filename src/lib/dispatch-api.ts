@@ -430,6 +430,7 @@ export async function logJobTime(
     account,
     machine,
     time: stampTime(now),
+    atMs: now.getTime(),
     ...(action === "logout" ? { date: now.toLocaleDateString("en-US") } : {}),
     ...(status ? { status } : {}),
     ...(force ? { force: 1 } : {}),
